@@ -19,8 +19,6 @@ extern enum kk_debug kk_mesa_debug_flags;
 #define KK_DEBUG(flag) unlikely(kk_mesa_debug_flags &KK_DEBUG_##flag)
 
 enum kk_experimental {
-   /* Advertise custom border features */
-   KK_EXPERIMENTAL_CUSTOM_BORDER = 1ull << 0,
    /* Advertise image view min LOD feature */
    KK_EXPERIMENTAL_IMAGE_VIEW_MIN_LOD = 1ull << 1,
    /* Using allowGPUOptimizedContents for this format causes

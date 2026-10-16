@@ -17,9 +17,11 @@
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
 #include "kk_sampler.h"
+#include "kk_shader.h"
 
 #include "util/format/u_format.h"
 #include "util/half_float.h"
+#include "vk_format.h"
 
 static inline uint32_t
 align_u32(uint32_t v, uint32_t a)
@@ -85,6 +87,10 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
          float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
          desc[plane].image_min_lod_fp16 = _mesa_float_to_half(min_lod);
          desc[plane].image_min_lod_uint16 = min_lod;
+
+         if ((view->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+             vk_format_is_unorm(vk_format_depth_only(view->vk.view_format)))
+            desc[plane].image_flags |= KK_IMAGE_FLAG_UNORM_DEPTH;
       }
    }
 

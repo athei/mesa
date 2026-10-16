@@ -589,6 +589,18 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       return true;
    }
 
+   if (tex->op == nir_texop_image_flags_kk) {
+      unsigned offs =
+         offsetof(struct kk_sampled_image_descriptor, image_flags);
+
+      nir_def *flags = load_resource_deref_desc(
+         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
+         plane_offset_B + offs, ctx);
+
+      nir_def_replace(&tex->def, nir_u2u32(b, flags));
+      return true;
+   }
+
    if (tex->op == nir_texop_has_custom_border_color_agx) {
       unsigned offs = offsetof(struct kk_sampled_image_descriptor,
                                clamp_0_sampler_index_or_negative);

@@ -265,7 +265,11 @@ kk_CreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
           ? KK_SAMPLER_MINMAX_MIP_LINEAR
           : 0) |
       (pCreateInfo->unnormalizedCoordinates ? KK_SAMPLER_MINMAX_UNNORMALIZED
-                                            : 0);
+                                            : 0) |
+      (pCreateInfo->compareEnable
+          ? (pCreateInfo->compareOp & KK_SAMPLER_COMPARE_OP_MASK)
+               << KK_SAMPLER_COMPARE_OP_SHIFT
+          : 0);
 
    const VkSamplerReductionModeCreateInfo *reduction_info =
       vk_find_struct_const(pCreateInfo->pNext,

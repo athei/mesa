@@ -3230,6 +3230,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       vtn_fail("unexpected nir_texop_*_agx");
       break;
    case nir_texop_sampler_minmax_kk:
+   case nir_texop_image_flags_kk:
       vtn_fail("unexpected nir_texop_*_kk");
       break;
    case nir_texop_hdr_dim_nv:
