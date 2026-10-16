@@ -367,6 +367,30 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intr,
    b->cursor = nir_before_instr(&intr->instr);
    nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
 
+   if (nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
+      if (intr->intrinsic == nir_intrinsic_image_deref_size) {
+         nir_def *size = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_size_el), ctx);
+         nir_def_replace(&intr->def, nir_pad_vector_imm_int(
+                                        b, nir_u2uN(b, size, intr->def.bit_size),
+                                        0, intr->def.num_components));
+         return true;
+      }
+
+      if (intr->intrinsic != nir_intrinsic_image_deref_samples &&
+          intr->intrinsic != nir_intrinsic_image_deref_levels) {
+         nir_def *coord = intr->src[1].ssa;
+         nir_def *offset = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_offset_el),
+            ctx);
+         nir_def *x = nir_iadd(b, nir_channel(b, coord, 0),
+                               nir_u2uN(b, offset, coord->bit_size));
+         nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(b, coord, x, 0));
+      }
+   }
+
    /* Reads and queries use the texture descriptor; writes and atomics PBE. */
    unsigned offs =
       offsetof(struct kk_storage_image_descriptor, image_gpu_resource_id);
@@ -479,6 +503,31 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    if (!texture) {
       assert(!sampler);
       return false;
+   }
+
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF) {
+      nir_deref_instr *deref = nir_src_as_deref(nir_src_for_ssa(texture));
+
+      if (tex->op == nir_texop_txs) {
+         nir_def *size = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_size_el), ctx);
+         nir_def_replace(&tex->def, nir_pad_vector_imm_int(
+                                       b, nir_u2uN(b, size, tex->def.bit_size),
+                                       0, tex->def.num_components));
+         return true;
+      }
+
+      int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      if (coord_idx >= 0) {
+         nir_def *coord = tex->src[coord_idx].src.ssa;
+         nir_def *offset = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_offset_el),
+            ctx);
+         nir_src_rewrite(&tex->src[coord_idx].src,
+                         nir_iadd(b, coord, nir_u2uN(b, offset, coord->bit_size)));
+      }
    }
 
    nir_def *plane_ssa = nir_steal_tex_src(tex, nir_tex_src_plane);
