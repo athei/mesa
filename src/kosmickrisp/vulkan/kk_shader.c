@@ -128,6 +128,8 @@ struct kk_fs_key {
    uint32_t rasterization_samples;
    uint16_t static_sample_mask;
    bool sample_shading_enable;
+   bool alpha_to_coverage_enable;
+   bool alpha_to_one_enable;
    bool has_depth;
    bool has_stencil;
    bool dynamic_input_attachment_map;
@@ -157,6 +159,9 @@ kk_populate_fs_key(struct kk_fs_key *key,
       key->rasterization_samples = state->ms->rasterization_samples;
       key->static_sample_mask = state->ms->sample_mask;
       key->sample_shading_enable = state->ms->sample_shading_enable;
+      /* Lowered into the shader or set on the render pipeline */
+      key->alpha_to_coverage_enable = state->ms->alpha_to_coverage_enable;
+      key->alpha_to_one_enable = state->ms->alpha_to_one_enable;
    }
 
    /* Depth writes are removed unless there's an actual attachment */
@@ -315,10 +320,22 @@ kk_nir_swizzle_fragment_output(nir_builder *b, nir_intrinsic_instr *intrin,
             channel_swizzle[channel_unswizzle[i]] = i;
 
          b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *to_replace = intrin->src[0].ssa;
-         nir_def *swizzled = nir_swizzle(b, to_replace, channel_swizzle,
-                                         to_replace->num_components);
+         nir_def *value = intrin->src[0].ssa;
+         unsigned first = nir_intrinsic_component(intrin);
+         unsigned mask = nir_intrinsic_write_mask(intrin);
+         nir_def *undef = nir_undef(b, 1, value->bit_size);
+         nir_def *channels[4] = {undef, undef, undef, undef};
+         for (unsigned i = 0; i < value->num_components; i++) {
+            if ((mask & BITFIELD_BIT(i)) && first + i < 4)
+               channels[first + i] = nir_channel(b, value, i);
+         }
+
+         nir_def *swizzled = nir_swizzle(b, nir_vec(b, channels, 4),
+                                         channel_swizzle, 4);
          nir_src_rewrite(&intrin->src[0], swizzled);
+         intrin->num_components = 4;
+         nir_intrinsic_set_component(intrin, 0);
+         nir_intrinsic_set_write_mask(intrin, 0xf);
       } else {
          b->cursor = nir_after_instr(&intrin->instr);
          nir_def *to_replace = &intrin->def;
@@ -428,9 +445,331 @@ kk_get_logical_color_att_index(const struct vk_graphics_pipeline_state *state,
    return (state->cal) ? state->cal->color_map[i] : i;
 }
 
+static bool
+kk_vk_blend_factor_to_mtl(VkBlendFactor factor, uint8_t *out)
+{
+   switch (factor) {
+   case VK_BLEND_FACTOR_ZERO:
+      *out = MTL_BLEND_FACTOR_ZERO;
+      return true;
+   case VK_BLEND_FACTOR_ONE:
+      *out = MTL_BLEND_FACTOR_ONE;
+      return true;
+   case VK_BLEND_FACTOR_SRC_COLOR:
+      *out = MTL_BLEND_FACTOR_SOURCE_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_SOURCE_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_DST_COLOR:
+      *out = MTL_BLEND_FACTOR_DESTINATION_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_DESTINATION_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_SRC_ALPHA:
+      *out = MTL_BLEND_FACTOR_SOURCE_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_SOURCE_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_DST_ALPHA:
+      *out = MTL_BLEND_FACTOR_DESTINATION_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_DESTINATION_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_CONSTANT_COLOR:
+      *out = MTL_BLEND_FACTOR_BLEND_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_BLEND_COLOR;
+      return true;
+   case VK_BLEND_FACTOR_CONSTANT_ALPHA:
+      *out = MTL_BLEND_FACTOR_BLEND_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA:
+      *out = MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA;
+      return true;
+   case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
+      *out = MTL_BLEND_FACTOR_SOURCE_ALPHA_SATURATED;
+      return true;
+   default:
+      /* Dual source factors: the shader has no second color output */
+      return false;
+   }
+}
+
+static bool
+kk_vk_blend_op_to_mtl(VkBlendOp op, uint8_t *out)
+{
+   switch (op) {
+   case VK_BLEND_OP_ADD:
+      *out = MTL_BLEND_OPERATION_ADD;
+      return true;
+   case VK_BLEND_OP_SUBTRACT:
+      *out = MTL_BLEND_OPERATION_SUBTRACT;
+      return true;
+   case VK_BLEND_OP_REVERSE_SUBTRACT:
+      *out = MTL_BLEND_OPERATION_REVERSE_SUBTRACT;
+      return true;
+   case VK_BLEND_OP_MIN:
+      *out = MTL_BLEND_OPERATION_MIN;
+      return true;
+   case VK_BLEND_OP_MAX:
+      *out = MTL_BLEND_OPERATION_MAX;
+      return true;
+   default:
+      /* Advanced blend operations */
+      return false;
+   }
+}
+
+/* Whether Metal's alpha to one gives Vulkan's result: Vulkan replaces the
+ * alpha of every color attachment, but Metal's alpha to one only reaches
+ * color attachment 0 (on an M5 Max, an unblended second attachment kept the
+ * shader's alpha), so no other attachment may have alpha.
+ */
+static bool
+kk_other_attachments_take_alpha_to_one(
+   const struct vk_graphics_pipeline_state *state, uint8_t att0)
+{
+   for (uint8_t i = 0u; i < state->rp->color_attachment_count; ++i) {
+      if (i == att0 ||
+          kk_get_logical_color_att_index(state, i) == MESA_VK_ATTACHMENT_UNUSED)
+         continue;
+
+      VkFormat vk_format = state->rp->color_attachment_formats[i];
+      if (vk_format != VK_FORMAT_UNDEFINED &&
+          util_format_has_alpha(vk_format_to_pipe_format(vk_format)))
+         return false;
+   }
+
+   return true;
+}
+
+/* Whether the render pipeline does alpha to coverage, rather than the
+ * fragment shader. Alpha to coverage is never dynamic state here. Metal's
+ * own gives the coverage pattern of the GPU, the same as Apple's OpenGL,
+ * which is what applications tuned on macOS expect, but it reads the alpha
+ * of color attachment 0 as the fragment function returns it. The shader
+ * blends, masks and swizzles every other attachment, so for this one it
+ * returns the unblended color and the render pipeline does the rest:
+ * Metal's blending and write mask for the attachment and Metal's alpha to
+ * one, which comes after the coverage. That needs a native format with alpha
+ * that Metal can blend (not integer, at most 16 bits per channel when
+ * blending), no logic op, no advanced blending, and no dual source blending,
+ * since the shader has no second color output for Metal to blend with.
+ * Metal's alpha to one also needs no other attachment with alpha (see
+ * kk_other_attachments_take_alpha_to_one). Anything else lowers alpha to
+ * coverage, and alpha to one, in the shader. Fills blend with the
+ * attachment's blending when it returns true.
+ */
+static bool
+kk_pipeline_alpha_to_coverage(const struct vk_graphics_pipeline_state *state,
+                              struct mtl_color_attachment_blend *blend)
+{
+   if (!state->ms || !state->ms->alpha_to_coverage_enable ||
+       state->ms->rasterization_samples < 2)
+      return false;
+
+   if (state->cb && state->cb->logic_op_enable)
+      return false;
+
+   for (uint8_t i = 0u; i < state->rp->color_attachment_count; ++i) {
+      if (kk_get_logical_color_att_index(state, i) != 0)
+         continue;
+
+      VkFormat vk_format = state->rp->color_attachment_formats[i];
+      if (vk_format == VK_FORMAT_UNDEFINED)
+         return false;
+
+      enum pipe_format format = vk_format_to_pipe_format(vk_format);
+      if (util_format_is_pure_integer(format) ||
+          util_format_get_nr_components(format) < 4 ||
+          !kk_get_va_format(format)->is_native)
+         return false;
+
+      struct mtl_color_attachment_blend out = {
+         .write_mask = MTL_COLOR_WRITE_MASK_ALL,
+      };
+      if (state->cb) {
+         const struct vk_color_blend_attachment_state *att =
+            &state->cb->attachments[i];
+
+         out.write_mask =
+            ((att->write_mask & VK_COLOR_COMPONENT_R_BIT)
+                ? MTL_COLOR_WRITE_MASK_RED
+                : 0) |
+            ((att->write_mask & VK_COLOR_COMPONENT_G_BIT)
+                ? MTL_COLOR_WRITE_MASK_GREEN
+                : 0) |
+            ((att->write_mask & VK_COLOR_COMPONENT_B_BIT)
+                ? MTL_COLOR_WRITE_MASK_BLUE
+                : 0) |
+            ((att->write_mask & VK_COLOR_COMPONENT_A_BIT)
+                ? MTL_COLOR_WRITE_MASK_ALPHA
+                : 0);
+
+         if (att->blend_enable) {
+            if (util_format_get_component_bits(
+                   format, UTIL_FORMAT_COLORSPACE_RGB, 0) > 16)
+               return false;
+
+            out.blend_enable = true;
+            if (!kk_vk_blend_factor_to_mtl(att->src_color_blend_factor,
+                                           &out.src_rgb) ||
+                !kk_vk_blend_factor_to_mtl(att->dst_color_blend_factor,
+                                           &out.dst_rgb) ||
+                !kk_vk_blend_factor_to_mtl(att->src_alpha_blend_factor,
+                                           &out.src_alpha) ||
+                !kk_vk_blend_factor_to_mtl(att->dst_alpha_blend_factor,
+                                           &out.dst_alpha) ||
+                !kk_vk_blend_op_to_mtl(att->color_blend_op, &out.rgb_op) ||
+                !kk_vk_blend_op_to_mtl(att->alpha_blend_op, &out.alpha_op))
+               return false;
+         }
+      }
+
+      if (state->ms->alpha_to_one_enable &&
+          !kk_other_attachments_take_alpha_to_one(state, i))
+         return false;
+
+      if (blend)
+         *blend = out;
+      return true;
+   }
+
+   return false;
+}
+
+struct kk_split_color {
+   nir_variable *var[FRAG_RESULT_MAX][2];
+   nir_intrinsic_instr *store[FRAG_RESULT_MAX][2];
+   uint8_t mask[FRAG_RESULT_MAX][2];
+   bool split[FRAG_RESULT_MAX][2];
+};
+
+static bool
+kk_is_split_color_store(nir_intrinsic_instr *intr)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   return sem.location >= FRAG_RESULT_DATA0 &&
+          (nir_intrinsic_component(intr) != 0 ||
+           intr->src[0].ssa->num_components < 4);
+}
+
+static bool
+kk_gather_split_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct kk_split_color *split = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0)
+      return false;
+   if (kk_is_split_color_store(intr))
+      split->split[sem.location][sem.dual_source_blend_index] = true;
+
+   unsigned index = sem.dual_source_blend_index;
+   unsigned mask = nir_intrinsic_write_mask(intr)
+                   << nir_intrinsic_component(intr);
+   split->mask[sem.location][index] |= mask;
+   if (!split->store[sem.location][index])
+      split->store[sem.location][index] = intr;
+   return false;
+}
+
+static bool
+kk_merge_split_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct kk_split_color *split = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0)
+      return false;
+   nir_variable *var = split->var[sem.location][sem.dual_source_blend_index];
+   if (!var)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   unsigned first = nir_intrinsic_component(intr);
+   nir_def *value = intr->src[0].ssa;
+   nir_def *channels[4];
+   for (unsigned c = 0; c < 4; c++) {
+      channels[c] = c >= first && c - first < value->num_components
+                       ? nir_channel(b, value, c - first)
+                       : nir_undef(b, 1, value->bit_size);
+   }
+   nir_store_var(b, var, nir_vec(b, channels, 4),
+                 nir_intrinsic_write_mask(intr) << first);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static bool
+kk_nir_merge_split_color_outputs(nir_shader *nir)
+{
+   struct kk_split_color split = {0};
+   nir_shader_intrinsics_pass(nir, kk_gather_split_color, nir_metadata_all,
+                              &split);
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   bool any = false;
+   for (unsigned loc = FRAG_RESULT_DATA0; loc < FRAG_RESULT_MAX; loc++) {
+      for (unsigned i = 0; i < 2; i++) {
+         nir_intrinsic_instr *store = split.store[loc][i];
+         if (!store || !split.split[loc][i])
+            continue;
+         unsigned bit_size = store->src[0].ssa->bit_size;
+         split.var[loc][i] = nir_local_variable_create(
+            impl, glsl_vector_type(bit_size == 16 ? GLSL_TYPE_UINT16
+                                                  : GLSL_TYPE_UINT, 4),
+            "split_color");
+         nir_store_var(&b, split.var[loc][i], nir_undef(&b, 4, bit_size), 0xf);
+         any = true;
+      }
+   }
+   if (!any)
+      return false;
+
+   nir_shader_intrinsics_pass(nir, kk_merge_split_color, nir_metadata_none,
+                              &split);
+
+   b.cursor = nir_after_impl(impl);
+   for (unsigned loc = FRAG_RESULT_DATA0; loc < FRAG_RESULT_MAX; loc++) {
+      for (unsigned i = 0; i < 2; i++) {
+         nir_intrinsic_instr *store = split.store[loc][i];
+         if (!store || !split.split[loc][i])
+            continue;
+         unsigned count = util_last_bit(split.mask[loc][i]);
+         nir_io_semantics sem = nir_intrinsic_io_semantics(store);
+         nir_store_output(&b,
+                          nir_trim_vector(&b, nir_load_var(&b, split.var[loc][i]),
+                                          count),
+                          nir_imm_int(&b, 0), .base = nir_intrinsic_base(store),
+                          .range = 1, .write_mask = split.mask[loc][i],
+                          .component = 0,
+                          .src_type = nir_intrinsic_src_type(store),
+                          .io_semantics = sem);
+      }
+   }
+
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   return true;
+}
+
 static void
 kk_lower_fs_blend(nir_shader *nir,
-                  const struct vk_graphics_pipeline_state *state)
+                  const struct vk_graphics_pipeline_state *state,
+                  bool metal_blends_rt0)
 {
    nir_lower_blend_options opts = {
       .scalar_blend_const = false,
@@ -448,6 +787,11 @@ kk_lower_fs_blend(nir_shader *nir,
       if (logical_index == MESA_VK_ATTACHMENT_UNUSED) {
          continue;
       }
+
+      /* The render pipeline blends and masks it, the shader returns the
+       * color unchanged for alpha to coverage */
+      if (logical_index == 0 && metal_blends_rt0)
+         continue;
 
       nir_lower_blend_rt *rt = &opts.rt[logical_index];
 
@@ -486,6 +830,7 @@ kk_lower_fs_blend(nir_shader *nir,
    }
    /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, kk_nir_merge_split_color_outputs);
    NIR_PASS(_, nir, nir_lower_blend, &opts);
 }
 
@@ -511,11 +856,13 @@ kk_lower_fs(struct kk_device *dev, nir_shader *nir,
    nir->info.fs.uses_sample_shading |=
       state->ms && state->ms->sample_shading_enable;
 
+   bool metal_atoc = kk_pipeline_alpha_to_coverage(state, NULL);
+
    /* Must be lowered before blending */
    if (state->ms) {
       NIR_PASS(_, nir, msl_nir_lower_multisample_alpha,
-               state->ms->alpha_to_coverage_enable,
-               state->ms->alpha_to_one_enable);
+               state->ms->alpha_to_coverage_enable && !metal_atoc,
+               state->ms->alpha_to_one_enable && !metal_atoc);
    }
 
    /* msl_nir_lower_sample_shading needs to go before blending since
@@ -526,7 +873,7 @@ kk_lower_fs(struct kk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, msl_nir_lower_sample_shading);
 
    if (state->cb)
-      kk_lower_fs_blend(nir, state);
+      kk_lower_fs_blend(nir, state, metal_atoc);
 
    enum pipe_format rts[MAX_DRAW_BUFFERS] = {PIPE_FORMAT_NONE};
    const struct vk_render_pass_state *rp = state->rp;
@@ -1591,6 +1938,10 @@ gather_graphics_pipeline_create_info(
       const struct vk_multisample_state *ms = state->ms;
       info->vs.sample_count = ms->rasterization_samples;
    }
+   info->vs.alpha_to_coverage =
+      kk_pipeline_alpha_to_coverage(state, &info->vs.rt0_blend);
+   info->vs.alpha_to_one =
+      info->vs.alpha_to_coverage && state->ms->alpha_to_one_enable;
 
    /* We need to store all other stage sources in the vertex too otherwise we
     * won't be able to create the whole pipeline correctly. */
@@ -1716,6 +2067,15 @@ kk_new_render_pipeline(struct kk_device *device, struct kk_shader *vs,
    if (vs->info.vs.has_ms) {
       mtl_render_pipeline_descriptor_set_raster_sample_count(
          pipeline_descriptor, vs->info.vs.sample_count);
+   }
+
+   if (vs->info.vs.alpha_to_coverage) {
+      mtl_render_pipeline_descriptor_set_alpha_to_coverage(pipeline_descriptor,
+                                                           true);
+      mtl_render_pipeline_descriptor_set_alpha_to_one(
+         pipeline_descriptor, vs->info.vs.alpha_to_one);
+      mtl_render_pipeline_descriptor_set_color_attachment_blend(
+         pipeline_descriptor, 0, &vs->info.vs.rt0_blend);
    }
 
    render =

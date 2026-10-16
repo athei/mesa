@@ -75,38 +75,38 @@ static const struct {
     * which may extend to one varying extra (which is otherwise unused) */
    [VARYING_SLOT_CULL_PRIMITIVE + 1] = {"cull_primitive_1", .user = true,
                                         .scalarized = true},
-   [VARYING_SLOT_VAR0] = {"vary_00", .user = true},
-   [VARYING_SLOT_VAR1] = {"vary_01", .user = true},
-   [VARYING_SLOT_VAR2] = {"vary_02", .user = true},
-   [VARYING_SLOT_VAR3] = {"vary_03", .user = true},
-   [VARYING_SLOT_VAR4] = {"vary_04", .user = true},
-   [VARYING_SLOT_VAR5] = {"vary_05", .user = true},
-   [VARYING_SLOT_VAR6] = {"vary_06", .user = true},
-   [VARYING_SLOT_VAR7] = {"vary_07", .user = true},
-   [VARYING_SLOT_VAR8] = {"vary_08", .user = true},
-   [VARYING_SLOT_VAR9] = {"vary_09", .user = true},
-   [VARYING_SLOT_VAR10] = {"vary_10", .user = true},
-   [VARYING_SLOT_VAR11] = {"vary_11", .user = true},
-   [VARYING_SLOT_VAR12] = {"vary_12", .user = true},
-   [VARYING_SLOT_VAR13] = {"vary_13", .user = true},
-   [VARYING_SLOT_VAR14] = {"vary_14", .user = true},
-   [VARYING_SLOT_VAR15] = {"vary_15", .user = true},
-   [VARYING_SLOT_VAR16] = {"vary_16", .user = true},
-   [VARYING_SLOT_VAR17] = {"vary_17", .user = true},
-   [VARYING_SLOT_VAR18] = {"vary_18", .user = true},
-   [VARYING_SLOT_VAR19] = {"vary_19", .user = true},
-   [VARYING_SLOT_VAR20] = {"vary_20", .user = true},
-   [VARYING_SLOT_VAR21] = {"vary_21", .user = true},
-   [VARYING_SLOT_VAR22] = {"vary_22", .user = true},
-   [VARYING_SLOT_VAR23] = {"vary_23", .user = true},
-   [VARYING_SLOT_VAR24] = {"vary_24", .user = true},
-   [VARYING_SLOT_VAR25] = {"vary_25", .user = true},
-   [VARYING_SLOT_VAR26] = {"vary_26", .user = true},
-   [VARYING_SLOT_VAR27] = {"vary_27", .user = true},
-   [VARYING_SLOT_VAR28] = {"vary_28", .user = true},
-   [VARYING_SLOT_VAR29] = {"vary_29", .user = true},
-   [VARYING_SLOT_VAR30] = {"vary_30", .user = true},
-   [VARYING_SLOT_VAR31] = {"vary_31", .user = true},
+   [VARYING_SLOT_VAR0] = {"vary_00", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR1] = {"vary_01", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR2] = {"vary_02", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR3] = {"vary_03", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR4] = {"vary_04", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR5] = {"vary_05", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR6] = {"vary_06", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR7] = {"vary_07", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR8] = {"vary_08", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR9] = {"vary_09", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR10] = {"vary_10", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR11] = {"vary_11", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR12] = {"vary_12", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR13] = {"vary_13", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR14] = {"vary_14", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR15] = {"vary_15", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR16] = {"vary_16", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR17] = {"vary_17", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR18] = {"vary_18", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR19] = {"vary_19", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR20] = {"vary_20", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR21] = {"vary_21", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR22] = {"vary_22", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR23] = {"vary_23", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR24] = {"vary_24", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR25] = {"vary_25", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR26] = {"vary_26", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR27] = {"vary_27", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR28] = {"vary_28", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR29] = {"vary_29", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR30] = {"vary_30", .user = true, .scalarized = true},
+   [VARYING_SLOT_VAR31] = {"vary_31", .user = true, .scalarized = true},
 };
 
 static void
@@ -175,18 +175,25 @@ vs_output_block(nir_shader *shader, struct nir_to_msl_ctx *ctx)
    ctx->indentlevel++;
    u_foreach_bit64(location, shader->info.outputs_written) {
       struct io_slot_info info = ctx->outputs_info[location];
-      bool scalarized = VARYING_SLOT_INFO[location].scalarized;
-      const char *type = alu_type_to_string(info.type);
-      const char *vector_suffix =
-         scalarized ? "" : vector_suffixes[info.num_components];
-      unsigned components = scalarized ? info.num_components : 1;
-      for (int c = 0; c < components; c++) {
-         P_IND(ctx, "%s%s ", type, vector_suffix);
-         varying_slot_name(ctx, location, c);
-         P(ctx, " ");
-         varying_slot_semantic(ctx, location, c);
-         P(ctx, ";\n");
+      if (VARYING_SLOT_INFO[location].scalarized) {
+         for (unsigned c = 0; c < info.num_components; c++) {
+            nir_alu_type type = info.component_mask & BITFIELD_BIT(c)
+                                   ? info.components[c].type
+                                   : nir_type_float32;
+            P_IND(ctx, "%s ", alu_type_to_string(type));
+            varying_slot_name(ctx, location, c);
+            P(ctx, " ");
+            varying_slot_semantic(ctx, location, c);
+            P(ctx, ";\n");
+         }
+         continue;
       }
+      P_IND(ctx, "%s%s ", alu_type_to_string(info.type),
+            vector_suffixes[info.num_components]);
+      varying_slot_name(ctx, location, 0);
+      P(ctx, " ");
+      varying_slot_semantic(ctx, location, 0);
+      P(ctx, ";\n");
    }
 
    if (shader->info.clip_distance_array_size)
@@ -196,70 +203,60 @@ vs_output_block(nir_shader *shader, struct nir_to_msl_ctx *ctx)
    P(ctx, "};\n");
 }
 
-static void
-fs_input_interpolant(struct nir_to_msl_ctx *ctx, uint64_t location)
+static const char *
+fs_input_interpolant_mode(const struct io_component_info *info)
 {
-   struct io_slot_info info = ctx->inputs_info[location];
-   bool scalarized = VARYING_SLOT_INFO[location].scalarized;
-   const char *type = alu_type_to_string(info.type);
-   const char *vector_suffix =
-      scalarized ? "" : vector_suffixes[info.num_components];
-   unsigned components = scalarized ? info.num_components : 1;
-   const char *interp = "";
-   switch (info.interpolation) {
+   switch (info->interpolation) {
    case INTERP_MODE_SMOOTH:
-      interp = "interpolation::perspective";
-      break;
+      return "interpolation::perspective";
    case INTERP_MODE_NOPERSPECTIVE:
-      interp = "interpolation::no_perspective";
-      break;
+      return "interpolation::no_perspective";
    default:
       UNREACHABLE("Only perspective and no-perspective are allowed");
    }
-   for (int c = 0; c < components; c++) {
-      P_IND(ctx, "interpolant<%s%s, %s> ", type, vector_suffix, interp);
-      varying_slot_name(ctx, location, c);
-      P(ctx, " ");
-      varying_slot_semantic(ctx, location, c);
-      P(ctx, ";\n");
+}
+
+static const char *
+fs_input_qualifier(const struct io_component_info *info)
+{
+   switch (info->interpolation) {
+   case INTERP_MODE_NOPERSPECTIVE:
+      if (info->centroid)
+         return "[[centroid_no_perspective]]";
+      else if (info->sample)
+         return "[[sample_no_perspective]]";
+      else
+         return "[[center_no_perspective]]";
+   case INTERP_MODE_FLAT:
+      return "[[flat]]";
+   default:
+      if (info->centroid)
+         return "[[centroid_perspective]]";
+      else if (info->sample)
+         return "[[sample_perspective]]";
+      return "";
    }
 }
 
 static void
-fs_input_no_interpolant(struct nir_to_msl_ctx *ctx, uint64_t location)
+fs_input_member(struct nir_to_msl_ctx *ctx, uint64_t location,
+                unsigned component, const struct io_component_info *info,
+                const char *vector_suffix)
 {
-   struct io_slot_info info = ctx->inputs_info[location];
-   bool scalarized = VARYING_SLOT_INFO[location].scalarized;
-   const char *type = alu_type_to_string(info.type);
-   const char *vector_suffix =
-      scalarized ? "" : vector_suffixes[info.num_components];
-   unsigned components = scalarized ? info.num_components : 1;
-   const char *interp = "";
-   switch (info.interpolation) {
-   case INTERP_MODE_NOPERSPECTIVE:
-      if (info.centroid)
-         interp = "[[centroid_no_perspective]]";
-      else if (info.sample)
-         interp = "[[sample_no_perspective]]";
-      else
-         interp = "[[center_no_perspective]]";
-      break;
-   case INTERP_MODE_FLAT:
-      interp = "[[flat]]";
-      break;
-   default:
-      if (info.centroid)
-         interp = "[[centroid_perspective]]";
-      else if (info.sample)
-         interp = "[[sample_perspective]]";
-      break;
-   }
-   for (int c = 0; c < components; c++) {
-      P_IND(ctx, "%s%s ", type, vector_suffix);
-      varying_slot_name(ctx, location, c);
+   const char *type = alu_type_to_string(info->type);
+   if (info->uses_interpolant) {
+      P_IND(ctx, "interpolant<%s%s, %s> ", type, vector_suffix,
+            fs_input_interpolant_mode(info));
+      varying_slot_name(ctx, location, component);
       P(ctx, " ");
-      varying_slot_semantic(ctx, location, c);
-      P(ctx, " %s;\n", interp);
+      varying_slot_semantic(ctx, location, component);
+      P(ctx, ";\n");
+   } else {
+      P_IND(ctx, "%s%s ", type, vector_suffix);
+      varying_slot_name(ctx, location, component);
+      P(ctx, " ");
+      varying_slot_semantic(ctx, location, component);
+      P(ctx, " %s;\n", fs_input_qualifier(info));
    }
 }
 
@@ -270,11 +267,21 @@ fs_input_block(nir_shader *shader, struct nir_to_msl_ctx *ctx)
    P(ctx, "struct FragmentIn {\n");
    ctx->indentlevel++;
    u_foreach_bit64(location, shader->info.inputs_read) {
-      struct io_slot_info info = ctx->inputs_info[location];
-      if (info.uses_interpolant)
-         fs_input_interpolant(ctx, location);
-      else
-         fs_input_no_interpolant(ctx, location);
+      struct io_slot_info *info = &ctx->inputs_info[location];
+      if (VARYING_SLOT_INFO[location].scalarized) {
+         u_foreach_bit(c, info->component_mask)
+            fs_input_member(ctx, location, c, &info->components[c], "");
+      } else {
+         struct io_component_info slot = {
+            .type = info->type,
+            .interpolation = info->interpolation,
+            .centroid = info->centroid,
+            .sample = info->sample,
+            .uses_interpolant = info->uses_interpolant,
+         };
+         fs_input_member(ctx, location, 0, &slot,
+                         vector_suffixes[info->num_components]);
+      }
    }
 
    /* Enable reading from framebuffer */
@@ -350,6 +357,22 @@ msl_nir_gather_io_info(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
       ctx->input[location].uses_interpolant |=
          interp_intrin->intrinsic == nir_intrinsic_load_barycentric_at_sample ||
          interp_intrin->intrinsic == nir_intrinsic_load_barycentric_at_offset;
+      for (unsigned c = 0; c < intrin->num_components; c++) {
+         struct io_component_info *comp =
+            &ctx->input[location].components[component + c];
+         comp->type = nir_intrinsic_dest_type(intrin);
+         comp->interpolation = nir_intrinsic_interp_mode(interp_intrin);
+         comp->centroid = interp_intrin->intrinsic ==
+                          nir_intrinsic_load_barycentric_centroid;
+         comp->sample =
+            interp_intrin->intrinsic == nir_intrinsic_load_barycentric_sample;
+         comp->uses_interpolant |=
+            interp_intrin->intrinsic ==
+               nir_intrinsic_load_barycentric_at_sample ||
+            interp_intrin->intrinsic == nir_intrinsic_load_barycentric_at_offset;
+      }
+      ctx->input[location].component_mask |=
+         BITFIELD_RANGE(component, intrin->num_components);
       break;
    }
    case nir_intrinsic_load_input: {
@@ -365,6 +388,15 @@ msl_nir_gather_io_info(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
               intrin->num_components + component);
       assert(ctx->input[location].num_components <= 4u &&
              "Cannot have more than a vec4");
+      for (unsigned c = 0; c < intrin->num_components; c++) {
+         ctx->input[location].components[component + c] =
+            (struct io_component_info){
+               .type = nir_intrinsic_dest_type(intrin),
+               .interpolation = INTERP_MODE_FLAT,
+            };
+      }
+      ctx->input[location].component_mask |=
+         BITFIELD_RANGE(component, intrin->num_components);
       break;
    }
    case nir_intrinsic_load_output: {
@@ -402,6 +434,13 @@ msl_nir_gather_io_info(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
       ctx->output[location].num_components =
          MAX3(ctx->output[location].num_components, num_components,
               intrin->num_components);
+      u_foreach_bit(c, write_mask) {
+         if (component + c >= 4u)
+            continue;
+         ctx->output[location].components[component + c].type =
+            nir_intrinsic_src_type(intrin);
+         ctx->output[location].component_mask |= BITFIELD_BIT(component + c);
+      }
       assert(ctx->output[location].num_components <= 4u &&
              "Cannot have more than a vec4");
       break;
@@ -526,6 +565,15 @@ msl_input_num_components(struct nir_to_msl_ctx *ctx, uint32_t location)
       return 1;
    else
       return ctx->inputs_info[location].num_components;
+}
+
+bool
+msl_input_uses_interpolant(struct nir_to_msl_ctx *ctx, uint32_t location,
+                           uint32_t component)
+{
+   if (VARYING_SLOT_INFO[location].scalarized)
+      return ctx->inputs_info[location].components[component].uses_interpolant;
+   return ctx->inputs_info[location].uses_interpolant;
 }
 
 uint32_t

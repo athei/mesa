@@ -561,10 +561,10 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
     */
    if (tex->op == nir_texop_lod_bias) {
       unsigned offs =
-         offsetof(struct kk_sampled_image_descriptor, sampler_lod_bias_fp16);
+         offsetof(struct kk_sampled_image_descriptor, sampler_lod_bias);
 
       nir_def *bias = load_resource_deref_desc(
-         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
+         b, 1, 32, nir_src_as_deref(nir_src_for_ssa(sampler)),
          plane_offset_B + offs, ctx);
 
       nir_def_replace(&tex->def, bias);
@@ -976,6 +976,96 @@ lower_sparse_texel_buffers(nir_shader *nir,
 }
 
 static bool
+is_texel_buffer_fetch(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   return tex->sampler_dim == GLSL_SAMPLER_DIM_BUF &&
+          tex->op == nir_texop_txf && !tex->is_sparse &&
+          tex->def.num_components <= 4 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) >= 0 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_coord) >= 0;
+}
+
+static void
+lower_rgb32_texel_buffer_fetch(nir_builder *b, nir_tex_instr *tex,
+                               const struct lower_descriptors_ctx *ctx)
+{
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_deref_instr *deref = nir_src_as_deref(
+      tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_deref)].src);
+   nir_def *index = nir_u2u32(b, nir_get_tex_src(tex, nir_tex_src_coord));
+
+   nir_def *addr = load_resource_deref_desc(
+      b, 1, 64, deref,
+      offsetof(struct kk_storage_image_descriptor, buffer_rgb32_addr), ctx);
+   nir_def *size = load_resource_deref_desc(
+      b, 1, 32, deref,
+      offsetof(struct kk_storage_image_descriptor, buffer_size_el), ctx);
+
+   b->cursor = nir_instr_remove(&tex->instr);
+   nir_push_if(b, nir_ine_imm(b, addr, 0));
+   nir_def *in_bounds = nir_ult(b, index, size);
+   nir_def *offset_B = nir_imul_imm(
+      b, nir_u2u64(b, nir_bcsel(b, in_bounds, index, nir_imm_int(b, 0))), 12);
+   nir_def *texel = nir_build_load_global_constant(
+      b, 3, 32, nir_iadd(b, addr, offset_B), .align_mul = 4);
+   texel = nir_bcsel(b, in_bounds, texel, nir_imm_zero(b, 3, 32));
+
+   nir_alu_type T = nir_alu_type_get_base_type(tex->dest_type);
+   texel = nir_convert_to_bit_size(b, texel, T, tex->def.bit_size);
+   nir_def *one = T == nir_type_float
+                     ? nir_imm_floatN_t(b, 1.0, tex->def.bit_size)
+                     : nir_imm_intN_t(b, 1, tex->def.bit_size);
+   nir_def *comps[4] = {
+      nir_channel(b, texel, 0),
+      nir_channel(b, texel, 1),
+      nir_channel(b, texel, 2),
+      one,
+   };
+   nir_def *rgb = nir_vec(b, comps, tex->def.num_components);
+   nir_push_else(b, NULL);
+   nir_builder_instr_insert(b, &tex->instr);
+   nir_pop_if(b, NULL);
+
+   nir_def *result = nir_if_phi(b, rgb, &tex->def);
+   nir_foreach_use_including_if_safe(use, &tex->def) {
+      if (nir_src_is_if(use) ||
+          nir_src_use_instr(use) != nir_def_instr(result))
+         nir_src_rewrite(use, result);
+   }
+}
+
+static bool
+lower_rgb32_texel_buffers(nir_shader *nir,
+                          const struct lower_descriptors_ctx *ctx)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, nir) {
+      struct util_dynarray fetches = UTIL_DYNARRAY_INIT;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (is_texel_buffer_fetch(instr))
+               util_dynarray_append(&fetches, instr);
+         }
+      }
+
+      nir_builder b = nir_builder_create(impl);
+      util_dynarray_foreach(&fetches, nir_instr *, instr)
+         lower_rgb32_texel_buffer_fetch(&b, nir_instr_as_tex(*instr), ctx);
+
+      bool lowered = util_dynarray_num_elements(&fetches, nir_instr *) > 0;
+      util_dynarray_fini(&fetches);
+      progress |= nir_progress(lowered, impl, nir_metadata_none);
+   }
+   return progress;
+}
+
+static bool
 try_lower_descriptors_instr(nir_builder *b, nir_instr *instr, void *_data)
 {
    const struct lower_descriptors_ctx *ctx = _data;
@@ -1174,6 +1264,7 @@ kk_nir_lower_descriptors(nir_shader *nir,
     * Apple. This is inherited from NVK.
     */
    bool pass_lower_sparse = lower_sparse_texel_buffers(nir, &ctx);
+   bool pass_lower_rgb32 = lower_rgb32_texel_buffers(nir, &ctx);
 
    bool pass_lower_descriptors = nir_shader_instructions_pass(
       nir, try_lower_descriptors_instr, nir_metadata_control_flow, &ctx);
@@ -1181,7 +1272,8 @@ kk_nir_lower_descriptors(nir_shader *nir,
    bool pass_lower_ssbo = nir_shader_intrinsics_pass(
       nir, lower_ssbo_descriptor, nir_metadata_control_flow, &ctx);
 
-   return pass_lower_sparse || pass_lower_descriptors || pass_lower_ssbo;
+   return pass_lower_sparse || pass_lower_rgb32 || pass_lower_descriptors ||
+          pass_lower_ssbo;
 }
 
 static bool

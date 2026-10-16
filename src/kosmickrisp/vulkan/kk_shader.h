@@ -12,6 +12,7 @@
 #include "kk_private.h"
 
 #include "kosmickrisp/bridge/mtl_format.h"
+#include "kosmickrisp/bridge/mtl_types.h"
 
 #include "poly/nir/poly_nir.h"
 
@@ -89,6 +90,11 @@ struct kk_shader_info {
          } stencil_front, stencil_back;
          uint8_t color_attachment_count;
          bool has_ms;
+         /* Metal does alpha to coverage, alpha to one and the blending of
+          * color attachment 0, see kk_pipeline_alpha_to_coverage() */
+         bool alpha_to_coverage;
+         bool alpha_to_one;
+         struct mtl_color_attachment_blend rt0_blend;
          bool has_ds;
          bool has_depth_write;
          bool has_stencil_test;

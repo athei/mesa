@@ -43,6 +43,9 @@ void mtl_render_pass_attachment_descriptor_set_level(
 void mtl_render_pass_attachment_descriptor_set_slice(
    mtl_render_pass_attachment_descriptor *descriptor, uint32_t slice);
 
+void mtl_render_pass_attachment_descriptor_set_depth_plane(
+   mtl_render_pass_attachment_descriptor *descriptor, uint32_t depth_plane);
+
 void mtl_render_pass_attachment_descriptor_set_load_action(
    mtl_render_pass_attachment_descriptor *descriptor,
    enum mtl_load_action action);
