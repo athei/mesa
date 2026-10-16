@@ -29,7 +29,9 @@ struct kk_sampled_image_descriptor {
    uint16_t sampler_minmax_flags;
    uint32_t border[4];
    uint64_t residency_gpu_resource_id;
-   uint64_t pad_to_power_2[2];
+   uint16_t image_flags;
+   uint16_t pad16[3];
+   uint64_t pad_to_power_2;
 };
 
 static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,
