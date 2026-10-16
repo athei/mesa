@@ -76,8 +76,15 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
        view->vk.format == VK_FORMAT_R32_SINT)
       usage |= MTL_TEXTURE_USAGE_SHADER_ATOMIC;
 
+   uint32_t el_size_B = util_format_get_blocksize(p_format);
+   uint64_t aligned_offset_B =
+      view->vk.offset & ~(uint64_t)(KK_MIN_TEXEL_BUFFER_ALIGNMENT - 1);
+   uint32_t lead_B = view->vk.offset - aligned_offset_B;
+   assert(lead_B % el_size_B == 0);
+   view->offset_el = lead_B / el_size_B;
+
    struct kk_image_layout layout = {
-      .width_px = view->vk.elements,
+      .width_px = view->vk.elements + view->offset_el,
       .height_px = 1u,
       .depth_px = 1u,
       .layers = 1u,
@@ -95,13 +102,13 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
             .blue = supported_format->unswizzle.blue,
             .alpha = supported_format->unswizzle.alpha,
          },
-      .linear_stride_B = view->vk.range,
+      .linear_stride_B = view->vk.range + lead_B,
    };
    struct kk_buffer *buffer =
       container_of(view->vk.buffer, struct kk_buffer, vk);
    view->mtl_texel_buffer_handle = mtl_new_texture_with_descriptor_linear(
       buffer->metal.handle, &layout,
-      kk_buffer_mtl_offset(buffer, view->vk.offset));
+      kk_buffer_mtl_offset(buffer, aligned_offset_B));
    if (!view->mtl_texel_buffer_handle) {
       vk_buffer_view_destroy(&dev->vk, pAllocator, &view->vk);
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);

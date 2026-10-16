@@ -571,7 +571,11 @@ kk_get_device_properties(
       .maxImageDimension3D = kk_image_max_dimension(pdev, VK_IMAGE_TYPE_3D),
       .maxImageDimensionCube = kk_image_max_dimension(pdev, VK_IMAGE_TYPE_2D),
       .maxImageArrayLayers = 2048,
-      .maxTexelBufferElements = 16384 * 16384,
+      /* Metal's limit, less the elements a view's offset can be moved back by
+       * to align it (kk_CreateBufferView)
+       */
+      .maxTexelBufferElements =
+         16384 * 16384 - (KK_MIN_TEXEL_BUFFER_ALIGNMENT - 1),
       .maxUniformBufferRange = 65536,
       .maxStorageBufferRange = UINT32_MAX,
       .maxPushConstantsSize = KK_MAX_PUSH_SIZE,
@@ -778,9 +782,9 @@ kk_get_device_properties(
       .integerDotProduct4x8BitPackedSignedAccelerated = false,
       .integerDotProduct4x8BitPackedMixedSignednessAccelerated = false,
       .storageTexelBufferOffsetAlignmentBytes = KK_MIN_TEXEL_BUFFER_ALIGNMENT,
-      .storageTexelBufferOffsetSingleTexelAlignment = false,
+      .storageTexelBufferOffsetSingleTexelAlignment = true,
       .uniformTexelBufferOffsetAlignmentBytes = KK_MIN_TEXEL_BUFFER_ALIGNMENT,
-      .uniformTexelBufferOffsetSingleTexelAlignment = false,
+      .uniformTexelBufferOffsetSingleTexelAlignment = true,
       .maxBufferSize = pdev->info.max_buffer_size,
 
       /* VK_KHR_push_descriptor */
