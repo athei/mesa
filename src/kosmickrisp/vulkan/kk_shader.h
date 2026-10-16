@@ -50,6 +50,7 @@ kk_tess_info_merge(struct kk_tess_info a, struct kk_tess_info b)
 struct kk_shader_info {
    mesa_shader_stage stage;
    bool uses_per_draw_data;
+   bool has_fs_stats;
 
    /* Required for fragment shader cull distance discards. */
    uint8_t num_cull_distances;
@@ -125,6 +126,7 @@ struct kk_pipeline_handles {
    union {
       struct {
          mtl_render_pipeline_state *render;
+         mtl_render_pipeline_state *render_stats;
          /* VS, TCS, TES and the GS compute pass at most run before the render
           * pipeline. */
          mtl_compute_pipeline_state *pre_render[4];
@@ -153,6 +155,7 @@ struct kk_shader {
    struct msl_compile_data gs_main;
    struct msl_compile_data gs_count;
    struct msl_compile_data gs_pre;
+   struct msl_compile_data fs_stats;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
@@ -184,6 +187,9 @@ kk_nir_lower_descriptors(nir_shader *nir,
 bool kk_nir_add_device_barrier_workaround(nir_shader *nir);
 
 bool kk_nir_lower_poly(struct nir_shader *nir);
+
+mtl_render_pipeline_state *kk_shader_get_stats_pipeline(struct kk_device *dev,
+                                                        struct kk_shader *vs);
 bool kk_nir_lower_null_images(nir_shader *nir);
 
 bool kk_nir_lower_textures(nir_shader *nir);

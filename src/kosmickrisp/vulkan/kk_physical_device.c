@@ -243,6 +243,7 @@ kk_get_device_features(
       .logicOp = true,
       .multiViewport = true,
       .occlusionQueryPrecise = true,
+      .pipelineStatisticsQuery = true,
       .robustBufferAccess = true,
       .samplerAnisotropy = true,
       .sampleRateShading = true,
