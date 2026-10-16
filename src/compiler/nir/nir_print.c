@@ -2014,6 +2014,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_custom_border_color_agx:
       fprintf(fp, "custom_border_color_agx ");
       break;
+   case nir_texop_sampler_minmax_kk:
+      fprintf(fp, "sampler_minmax_kk ");
+      break;
    case nir_texop_hdr_dim_nv:
       fprintf(fp, "hdr_dim_nv ");
       break;

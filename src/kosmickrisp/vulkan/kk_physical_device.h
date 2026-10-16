@@ -107,4 +107,10 @@ void kk_physical_device_destroy(struct vk_physical_device *vk_device);
 #define KK_USE_WSI_PLATFORM
 #endif
 
+static inline bool
+kk_has_native_sampler_minmax(const struct kk_physical_device *pdev)
+{
+   return pdev->info.gpu_apple_family >= 10;
+}
+
 #endif // KK_PHYSICAL_DEVICE_H

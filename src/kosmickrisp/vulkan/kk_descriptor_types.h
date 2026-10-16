@@ -26,7 +26,7 @@ struct kk_sampled_image_descriptor {
    uint16_t image_min_lod_fp16;
    uint16_t image_min_lod_uint16;
 
-   uint16_t pad_to_64_bits;
+   uint16_t sampler_minmax_flags;
    uint32_t border[4];
    uint64_t pad_to_power_2[3];
 };

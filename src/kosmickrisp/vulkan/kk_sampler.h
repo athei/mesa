@@ -28,6 +28,7 @@ struct kk_sampler {
    uint16_t lod_bias_fp16;
    uint16_t lod_min_fp16;
    uint16_t lod_max_fp16;
+   uint16_t minmax_flags;
 
    struct {
       struct kk_rc_sampler *hw;
