@@ -251,6 +251,7 @@ void util_barrier_init(util_barrier *barrier, unsigned count)
 {
    barrier->count = count;
    barrier->waiters = 0;
+   barrier->leaving = 0;
    barrier->sequence = 0;
    (void) mtx_init(&barrier->mutex, mtx_plain);
    cnd_init(&barrier->condvar);
@@ -267,24 +268,35 @@ bool util_barrier_wait(util_barrier *barrier)
 {
    mtx_lock(&barrier->mutex);
 
+   while (barrier->leaving)
+      cnd_wait(&barrier->condvar, &barrier->mutex);
+
    assert(barrier->waiters < barrier->count);
    barrier->waiters++;
 
-   if (barrier->waiters < barrier->count) {
+   const bool serial = barrier->waiters == barrier->count;
+   if (!serial) {
       uint64_t sequence = barrier->sequence;
 
       do {
          cnd_wait(&barrier->condvar, &barrier->mutex);
       } while (sequence == barrier->sequence);
+
+      if (--barrier->leaving == 0)
+         cnd_broadcast(&barrier->condvar);
    } else {
       barrier->waiters = 0;
+      barrier->leaving = barrier->count - 1;
       barrier->sequence++;
       cnd_broadcast(&barrier->condvar);
+
+      while (barrier->leaving)
+         cnd_wait(&barrier->condvar, &barrier->mutex);
    }
 
    mtx_unlock(&barrier->mutex);
 
-   return true;
+   return serial;
 }
 
 #endif
