@@ -20,7 +20,6 @@ enum kk_experimental kk_mesa_experimental_flags = 0;
 
 const struct debug_named_value experimental_flags[] = {
    {"all", UINT64_MAX},
-   {"custom_border", KK_EXPERIMENTAL_CUSTOM_BORDER},
    {"image_view_min_lod", KK_EXPERIMENTAL_IMAGE_VIEW_MIN_LOD},
    {"optimize_e5b9g9r9", KK_EXPERIMENTAL_OPTIMIZE_E5B9G9R9},
    {NULL, 0},
