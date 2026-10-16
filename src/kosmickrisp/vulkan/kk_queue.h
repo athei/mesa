@@ -29,6 +29,7 @@ struct kk_queue {
    struct kk_cmd_pool *cmd_pool;
    struct util_dynarray free_cmd_buffers;
    uint32_t commits_in_flight;
+   uint32_t work_in_flight;
    mtx_t mutex;
    cnd_t cond;
 };
@@ -42,6 +43,8 @@ kk_queue_device(struct kk_queue *queue)
 VkResult kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
                        const VkDeviceQueueCreateInfo *pCreateInfo,
                        uint32_t index_in_family);
+
+void kk_queue_wait_for_idle(struct kk_queue *queue);
 
 void kk_queue_finish(struct kk_device *dev, struct kk_queue *queue);
 

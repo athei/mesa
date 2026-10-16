@@ -715,6 +715,9 @@ tex_type_name(nir_alu_type ty)
       return "ushort";
    case nir_type_uint32:
       return "uint";
+   case nir_type_int64:
+   case nir_type_uint64:
+      return "ulong";
    case nir_type_float16:
       return "half";
    case nir_type_float32:
@@ -735,6 +738,10 @@ instrinsic_needs_dest_type(nir_intrinsic_instr *instr)
        op == nir_intrinsic_shared_atomic_swap ||
        op == nir_intrinsic_bindless_image_atomic_swap ||
        op == nir_intrinsic_bindless_image_sparse_load)
+      return false;
+   if ((op == nir_intrinsic_global_atomic ||
+        op == nir_intrinsic_bindless_image_atomic) &&
+       instr->def.bit_size == 64)
       return false;
    return info->has_dest;
 }
@@ -967,8 +974,15 @@ atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
    const char *atomic_op = atomic_op_to_msl(nir_intrinsic_atomic_op(instr));
    const char *mem_order = "memory_order_relaxed";
 
-   P(ctx, "%s_explicit((%s atomic_%s*)", atomic_op, scope,
-     msl_type_for_def(ctx->types, &instr->def));
+   if (instr->def.bit_size == 64) {
+      const bool is_max = nir_intrinsic_atomic_op(instr) == nir_atomic_op_umax;
+      assert(is_max || nir_intrinsic_atomic_op(instr) == nir_atomic_op_umin);
+      P_IND(ctx, "%s_explicit((%s atomic_ulong*)",
+            is_max ? "atomic_max" : "atomic_min", scope);
+   } else {
+      P(ctx, "%s_explicit((%s atomic_%s*)", atomic_op, scope,
+        msl_type_for_def(ctx->types, &instr->def));
+   }
    if (shared)
       P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
    src_to_msl(ctx, &instr->src[0]);
@@ -1649,6 +1663,9 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    }
    case nir_intrinsic_bindless_image_load:
+      if (instr->def.bit_size == 64) {
+         P(ctx, "as_type<%s>(", msl_type_for_def(ctx->types, &instr->def));
+      }
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ".read(");
       image_coord_swizzle(ctx, instr);
@@ -1662,13 +1679,21 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       for (uint32_t i = 0u; i < instr->def.num_components; ++i) {
          P(ctx, "%c", "xyzw"[i]);
       }
+      if (instr->def.bit_size == 64)
+         P(ctx, ")");
       P(ctx, ";\n");
       break;
    case nir_intrinsic_bindless_image_store:
       P_INDENT(ctx);
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ".write(");
-      src_to_msl(ctx, &instr->src[3]);
+      if (instr->src[3].ssa->bit_size == 64) {
+         P(ctx, "ulong4(");
+         src_to_msl(ctx, &instr->src[3]);
+         P(ctx, ")");
+      } else {
+         src_to_msl(ctx, &instr->src[3]);
+      }
       P(ctx, ", ");
       image_coord_swizzle(ctx, instr);
       if (nir_intrinsic_image_dim(instr) != GLSL_SAMPLER_DIM_BUF) {
@@ -1678,6 +1703,19 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       P(ctx, ");\n");
       break;
    case nir_intrinsic_bindless_image_atomic:
+      if (instr->def.bit_size == 64) {
+         const bool is_max =
+            nir_intrinsic_atomic_op(instr) == nir_atomic_op_umax;
+         assert(is_max || nir_intrinsic_atomic_op(instr) == nir_atomic_op_umin);
+         P_INDENT(ctx);
+         src_to_msl(ctx, &instr->src[0]);
+         P(ctx, ".%s(", is_max ? "atomic_max" : "atomic_min");
+         image_coord_swizzle(ctx, instr);
+         P(ctx, ", ulong4(");
+         src_to_msl(ctx, &instr->src[3]);
+         P(ctx, "));\n");
+         break;
+      }
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ".%s(", atomic_op_to_msl(nir_intrinsic_atomic_op(instr)));
       image_coord_swizzle(ctx, instr);

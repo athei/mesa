@@ -86,9 +86,14 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
    if (va_format == NULL)
       return 0;
 
+   const bool is_int64 =
+      p_format == PIPE_FORMAT_R64_UINT || p_format == PIPE_FORMAT_R64_SINT;
+
    // Textures can at least be sampled
-   features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
-   features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+   if (!is_int64) {
+      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
+      features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+   }
 
    /* Not all GPUs support linear filtering of 32bit float formats (A chips) */
    if (va_format->filter && (pdev->info.supports_32_bit_float_filtering ||

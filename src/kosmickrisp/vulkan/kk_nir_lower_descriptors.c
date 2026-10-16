@@ -426,7 +426,31 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intr,
       .access = nir_intrinsic_access(intr) | var->data.access,
       .flags = msl_convert_access_flag(var->data.access));
 
+   /* What kk_nir_lower_atomic64 needs of the view, in the sample source:
+    * whether the texture has Metal atomic usage (bit 0) and the base array
+    * layer of the view (the bits above). A texel buffer gives neither. */
+   nir_def *atomic64 = NULL;
+   if ((nir_intrinsic_has_atomic_op(intr) && intr->def.bit_size == 64) ||
+       (intr->intrinsic == nir_intrinsic_image_deref_store &&
+        intr->src[3].ssa->bit_size == 64 &&
+        (nir_intrinsic_access(intr) & ACCESS_ATOMIC))) {
+      if (nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
+         atomic64 = nir_imm_int(b, 0);
+      } else {
+         nir_def *usage = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_size_el), ctx);
+         nir_def *layer = load_resource_deref_desc(
+            b, 1, 32, deref,
+            offsetof(struct kk_storage_image_descriptor, buffer_offset_el),
+            ctx);
+         atomic64 = nir_ior(b, usage, nir_ishl_imm(b, layer, 1));
+      }
+   }
+
    nir_rewrite_image_intrinsic(intr, handle, nir_image_intrinsic_type_bindless);
+   if (atomic64)
+      nir_src_rewrite(&intr->src[2], atomic64);
 
    return true;
 }

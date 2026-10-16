@@ -133,7 +133,18 @@ struct kk_device {
       struct util_idalloc tags;
       simple_mtx_t lock;
    } sparse_residency;
+
+   struct {
+      struct kk_bo *bo;
+      simple_mtx_t lock;
+      uint32_t locked;
+      /* Set once a 64-bit storage view of an image without atomic usage
+       * was bound and said so (kk_descriptor_set.c) */
+      uint32_t warned_no_atomic_usage;
+   } atomic64;
 };
+
+void kk_device_lock_atomic64(struct kk_device *dev, uint32_t classes);
 
 VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 

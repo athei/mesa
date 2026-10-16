@@ -37,7 +37,9 @@ static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,
 
 struct kk_storage_image_descriptor {
    uint64_t image_gpu_resource_id;
+   /* For a storage image: the base array layer of the view. */
    uint32_t buffer_offset_el;
+   /* For a storage image: 1 if the texture has Metal atomic usage. */
    uint32_t buffer_size_el;
    uint64_t residency_gpu_resource_id;
    uint64_t pad_to_power_2;

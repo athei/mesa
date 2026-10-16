@@ -13,6 +13,7 @@
 #include "kk_descriptor_set_layout.h"
 #include "kk_device.h"
 #include "kk_entrypoints.h"
+#include "kk_image.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
 #include "kk_sampler.h"
@@ -174,6 +175,28 @@ get_storage_image_view_desc(
       desc.image_gpu_resource_id = view->planes[plane].storage_gpu_resource_id;
       desc.residency_gpu_resource_id =
          view->planes[plane].storage_residency_gpu_resource_id;
+
+      const struct kk_image *image =
+         container_of(view->vk.image, struct kk_image, vk);
+      desc.buffer_size_el = !!(image->planes[plane].layout.usage &
+                               MTL_TEXTURE_USAGE_SHADER_ATOMIC);
+      /* The layer of the image where the view starts, for the lock of
+       * kk_nir_lower_atomic64: shader coordinates are relative to it. */
+      desc.buffer_offset_el = view->vk.base_array_layer;
+
+      /* Every 64-bit atomic on such a view runs under the device's lock
+       * (kk_nir_lower_atomic64.c), also a umin or umax with an unused
+       * result, which runs natively on an image with atomic usage */
+      if (!desc.buffer_size_el && (view->vk.format == VK_FORMAT_R64_UINT ||
+                                   view->vk.format == VK_FORMAT_R64_SINT)) {
+         struct kk_device *dev =
+            container_of(view->vk.base.device, struct kk_device, vk);
+         if (!p_atomic_read(&dev->atomic64.warned_no_atomic_usage) &&
+             !p_atomic_xchg(&dev->atomic64.warned_no_atomic_usage, 1))
+            mesa_logw("A %s storage view of an image without Metal atomic "
+                      "usage is bound: 64-bit atomics on it take the lock",
+                      vk_Format_to_str(view->vk.format));
+      }
    }
 
    assert(sizeof(desc) <= dst_size);
