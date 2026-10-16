@@ -237,7 +237,8 @@ alu_src_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr, int srcn)
    nir_alu_src *src = &instr->src[srcn];
    bool sparse = def_is_sparse(src->src.ssa);
    if (sparse && alu_src_reads_residency(instr, srcn)) {
-      const char *bitcast = msl_bitcast_for_src(ctx->types, &src->src);
+      const char *bitcast =
+         msl_bitcast_for_residency_src(ctx->types, &src->src);
       if (bitcast)
          P(ctx, "as_type<%s>(", bitcast);
       P(ctx, "t%d_c", src->src.ssa->index);
