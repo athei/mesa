@@ -72,6 +72,7 @@ struct kk_shader_info {
          /* Data needed to start render pass and bind pipeline. */
          uint32_t attribs_read;
          uint32_t sample_count;
+         bool provoking_ids;
 
          /* Data needed for serialization. */
          enum mtl_primitive_topology_class topology;

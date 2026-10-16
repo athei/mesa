@@ -196,9 +196,12 @@ struct poly_vertex_params {
 
    /* Mask of outputs present in the output buffer */
    uint64_t outputs;
+
+   uint32_t groups[3];
+   uint32_t _pad2;
 } PACKED;
-static_assert(sizeof(struct poly_vertex_params) == 16 * 4,
-              "struct poly_vertex_params must be 16 words");
+static_assert(sizeof(struct poly_vertex_params) == 20 * 4,
+              "struct poly_vertex_params must be 20 words");
 
 static inline void
 poly_vertex_params_init(struct poly_vertex_params *p,
@@ -268,6 +271,8 @@ struct poly_geometry_params {
    /* Output index buffer, allocated by pre-GS. */
    DEVICE(uint) output_index_buffer;
 
+   DEVICE(uchar) vertex_buffer;
+
    /* Address of transform feedback buffer in general, supplied by the CPU. */
    DEVICE(uchar) xfb_base_original[POLY_MAX_SO_BUFFERS];
 
@@ -318,9 +323,11 @@ struct poly_geometry_params {
     * layout() declared input class.
     */
    uint32_t input_topology;
+
+   uint32_t groups[3];
 } PACKED;
-static_assert(sizeof(struct poly_geometry_params) == 79 * 4,
-              "struct poly_geometry_params must be 79 words");
+static_assert(sizeof(struct poly_geometry_params) == 84 * 4,
+              "struct poly_geometry_params must be 84 words");
 
 static inline void
 poly_geometry_params_init(struct poly_geometry_params *p,
