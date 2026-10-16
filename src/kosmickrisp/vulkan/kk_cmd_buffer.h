@@ -104,6 +104,7 @@ struct kk_per_draw_data {
 
    uint64_t sink;
    uint64_t fs_invocations;
+   uint64_t provoking_ids;
 };
 
 struct kk_attachment {
@@ -428,8 +429,6 @@ bool kk_attachment_do_renderpass_resolve(const struct kk_attachment *attachment,
 enum kk_grid_mode {
    KK_GRID_DIRECT = 0u,
    KK_GRID_INDIRECT,
-   /* Thread counts, then threadgroup size, like poly's grids */
-   KK_GRID_INDIRECT_LOCAL,
 };
 struct kk_grid {
    enum kk_grid_mode mode;
@@ -465,15 +464,6 @@ kk_grid_indirect(uint64_t addr)
 {
    return (struct kk_grid){
       .mode = KK_GRID_INDIRECT,
-      .addr = addr,
-   };
-}
-
-static struct kk_grid
-kk_grid_indirect_local(uint64_t addr)
-{
-   return (struct kk_grid){
-      .mode = KK_GRID_INDIRECT_LOCAL,
       .addr = addr,
    };
 }

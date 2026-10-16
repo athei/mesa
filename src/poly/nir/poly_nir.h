@@ -50,6 +50,9 @@ struct poly_gs_info {
    unsigned invocations;
    int16_t static_count[4];
    int8_t count_index[4];
+
+   bool materialize;
+   unsigned vertex_buffer_stride;
 };
 
 bool poly_nir_lower_gs(struct nir_shader *gs, struct nir_shader **gs_count,

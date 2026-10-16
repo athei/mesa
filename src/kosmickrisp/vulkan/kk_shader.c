@@ -22,6 +22,7 @@
 #include "kosmickrisp/compiler/nir_to_msl.h"
 
 #include "nir_builder.h"
+#include "nir_control_flow.h"
 #include "nir_lower_blend.h"
 
 #include "poly/nir/poly_nir.h"
@@ -107,17 +108,24 @@ has_static_depth_stencil_state(const struct vk_graphics_pipeline_state *state)
 }
 
 struct kk_vs_key {
-   bool is_points;
+   enum mesa_prim prim;
    struct vk_vertex_input_state vi;
 };
+
+static enum mesa_prim
+kk_assembled_prim(const struct vk_graphics_pipeline_state *state)
+{
+   enum mesa_prim prim =
+      u_decomposed_prim(vk_topology_to_mesa(state->ia->primitive_topology));
+   return mesa_prim_has_adjacency(prim) ? u_reduced_prim(prim) : prim;
+}
 
 static void
 kk_populate_vs_key(struct kk_vs_key *key,
                    const struct vk_graphics_pipeline_state *state)
 {
    memset(key, 0, sizeof(*key));
-   key->is_points =
-      (state->ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+   key->prim = kk_assembled_prim(state);
    key->vi = *state->vi;
 }
 
@@ -1361,6 +1369,155 @@ modify_nir_info(nir_shader *nir)
 }
 
 static bool
+gather_flat_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+
+   uint8_t *flat = data;
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   unsigned component = nir_intrinsic_component(intr);
+   unsigned mask = BITFIELD_RANGE(component, intr->def.num_components) & 0xf;
+   if (nir_src_is_const(intr->src[0])) {
+      flat[sem.location + nir_src_as_uint(intr->src[0])] |= mask;
+   } else {
+      for (unsigned i = 0; i < sem.num_slots; i++)
+         flat[sem.location + i] |= mask;
+   }
+   return false;
+}
+
+static bool
+kk_gather_flat_inputs(nir_shader *fs, uint8_t *flat)
+{
+   memset(flat, 0, NUM_TOTAL_VARYING_SLOTS);
+   nir_shader_intrinsics_pass(fs, gather_flat_input, nir_metadata_all, flat);
+   for (unsigned i = 0; i < NUM_TOTAL_VARYING_SLOTS; i++) {
+      if (flat[i])
+         return true;
+   }
+   return false;
+}
+
+static void
+kk_provoking_rewrite_block(nir_builder *b, nir_block *block, nir_def *vertex_id,
+                           nir_def *first_vertex, const uint8_t *flat,
+                           bool is_clone, nir_def *skip_vertex_id,
+                           nir_def *skip_first_vertex)
+{
+   nir_foreach_instr_safe(instr, block) {
+      if (instr->type != nir_instr_type_intrinsic)
+         continue;
+
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (&intr->def == skip_vertex_id || &intr->def == skip_first_vertex)
+         continue;
+
+      switch (intr->intrinsic) {
+      case nir_intrinsic_load_vertex_id:
+         nir_def_replace(&intr->def, vertex_id);
+         continue;
+      case nir_intrinsic_load_first_vertex:
+         nir_def_replace(&intr->def, first_vertex);
+         continue;
+      default:
+         break;
+      }
+
+      if (!is_clone)
+         continue;
+
+      if (intr->intrinsic == nir_intrinsic_store_output) {
+         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+         unsigned keep = 0;
+         if (nir_src_is_const(intr->src[1])) {
+            unsigned slot = sem.location + nir_src_as_uint(intr->src[1]);
+            keep = (flat[slot] >> nir_intrinsic_component(intr)) &
+                   nir_intrinsic_write_mask(intr);
+         }
+         if (keep)
+            nir_intrinsic_set_write_mask(intr, keep);
+         else
+            nir_instr_remove(instr);
+         continue;
+      }
+
+      if (intr->intrinsic == nir_intrinsic_store_clip_distance_kk ||
+          nir_intrinsic_writes_external_memory(intr)) {
+         if (nir_intrinsic_infos[intr->intrinsic].has_dest) {
+            b->cursor = nir_before_instr(instr);
+            nir_def_replace(&intr->def, nir_undef(b, intr->def.num_components,
+                                                  intr->def.bit_size));
+         } else {
+            nir_instr_remove(instr);
+         }
+      }
+   }
+}
+
+static bool
+kk_nir_lower_vs_provoking_ids(nir_shader *nir, const uint8_t *flat)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+
+   nir_cf_list body, clone;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+   nir_cf_list_clone(&clone, &body, &impl->cf_node, NULL);
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *per_draw = nir_load_per_draw_ptr_kk(&b, 1, 64);
+   nir_def *heap = nir_build_load_global_constant(
+      &b, 1, 64,
+      nir_iadd_imm(&b, per_draw,
+                   offsetof(struct kk_per_draw_data, provoking_ids)),
+      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
+   nir_def *has_ids = nir_ine_imm(&b, heap, 0);
+   nir_def *vertex_id = nir_load_vertex_id(&b);
+   nir_def *first_vertex = nir_load_first_vertex(&b);
+
+   nir_push_if(&b, has_ids);
+   nir_def *base = nir_build_load_global_constant(&b, 1, 64, heap,
+                                                  .align_mul = 8);
+   nir_def *pair = nir_build_load_global_constant(
+      &b, 2, 32, nir_iadd(&b, base, nir_u2u64(&b, nir_imul_imm(&b, vertex_id, 8))),
+      .align_mul = 8);
+   nir_def *base_vertex_addr = nir_build_load_global_constant(
+      &b, 1, 64,
+      nir_iadd_imm(&b, per_draw,
+                   offsetof(struct kk_per_draw_data, base_vertex_addr)),
+      .align_mul = 8);
+   nir_def *draw_first_vertex = nir_build_load_global_constant(
+      &b, 1, 32, base_vertex_addr, .align_mul = 4);
+   nir_def *pair_own = nir_channel(&b, pair, 0);
+   nir_def *pair_provoking = nir_channel(&b, pair, 1);
+   nir_pop_if(&b, NULL);
+
+   nir_def *own = nir_if_phi(&b, pair_own, vertex_id);
+   nir_def *provoking = nir_if_phi(&b, pair_provoking, vertex_id);
+   nir_def *first = nir_if_phi(&b, draw_first_vertex, first_vertex);
+
+   b.cursor = nir_cf_reinsert(&body, b.cursor);
+
+   nir_if *nif = nir_push_if(&b, has_ids);
+   b.cursor = nir_cf_reinsert(&clone, b.cursor);
+   nir_pop_if(&b, nif);
+
+   nir_foreach_block_safe(block, impl) {
+      bool in_clone = false;
+      for (nir_cf_node *node = block->cf_node.parent; node;
+           node = node->parent) {
+         if (node == &nif->cf_node)
+            in_clone = true;
+      }
+      kk_provoking_rewrite_block(&b, block, in_clone ? provoking : own,
+                                 first, flat, in_clone, vertex_id,
+                                 first_vertex);
+   }
+
+   return nir_progress(true, impl, nir_metadata_none);
+}
+
+static bool
 lower_vertex_id_zero_base(struct nir_builder *b, nir_intrinsic_instr *intrin,
                           void *data)
 {
@@ -1497,11 +1654,41 @@ kk_compile_msl(struct kk_physical_device *pdev, nir_shader *nir,
    ralloc_free(nir);
 }
 
+static bool
+kk_nir_guard_threads(nir_shader *nir, bool geometry)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *addr;
+   if (geometry) {
+      addr = nir_iadd_imm(&b, nir_load_geometry_param_buffer_poly(&b),
+                          offsetof(struct poly_geometry_params, grid));
+   } else {
+      addr = nir_iadd_imm(&b, nir_load_vertex_param_buffer_poly(&b),
+                          offsetof(struct poly_vertex_params,
+                                   verts_per_instance));
+   }
+
+   nir_def *limit = nir_load_global_constant(&b, 1, 32, addr);
+   nir_def *id = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+
+   nir_push_if(&b, nir_ult(&b, id, limit));
+   nir_cf_reinsert(&body, b.cursor);
+   nir_pop_if(&b, NULL);
+
+   return nir_progress(true, impl, nir_metadata_none);
+}
+
 static VkResult
 kk_compile_shader(struct kk_device *dev, nir_shader *nir,
                   struct kk_shader *prev_stage,
                   const struct vk_pipeline_robustness_state *robustness,
                   const struct vk_graphics_pipeline_state *state,
+                  const uint8_t *flat_inputs,
                   const VkAllocationCallbacks *pAllocator,
                   struct kk_shader **shader_out)
 {
@@ -1548,11 +1735,18 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
          memset(&nir->info.cs, 0, sizeof(nir->info.cs));
          nir->xfb_info = NULL;
          NIR_PASS(_, nir, poly_nir_lower_sw_vs);
-      } else
+         NIR_PASS(_, nir, kk_nir_guard_threads, false);
+      } else {
          /* Metal's instance_id contains base_instance. When the emulation path
           * is taken, since we launch compute, they correctly get translated.
           * For the non-emulated path we need to subtract base_instance... */
          NIR_PASS(_, nir, msl_nir_lower_instance_id);
+         if (flat_inputs) {
+            NIR_PASS(_, nir, kk_nir_lower_vs_provoking_ids, flat_inputs);
+            shader->info.uses_per_draw_data = true;
+            shader->info.vs.provoking_ids = true;
+         }
+      }
    } else if (stage == MESA_SHADER_TESS_CTRL) {
       /* TODO_KOSMICKRISP: Poly lowering breaks with vectorized I/O less than
        * 32-bit, which we support. Lower TCS inputs & outputs to scalar. */
@@ -1595,6 +1789,7 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
          nir->info.stage = MESA_SHADER_COMPUTE;
          memset(&nir->info.cs, 0, sizeof(nir->info.cs));
          nir->xfb_info = NULL;
+         NIR_PASS(_, nir, kk_nir_guard_threads, false);
       }
    } else if (stage == MESA_SHADER_GEOMETRY) {
       /* TODO_KOSMICKRISP: Poly lowering breaks with vectorized I/O less than
@@ -1602,13 +1797,15 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 
       nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
+      shader->info.gs.materialize = true;
       NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre_gs,
                &shader->info.gs);
 
-      if (shader->info.gs.count_words) {
+      if (count) {
          count->info.stage = MESA_SHADER_COMPUTE;
          memset(&count->info.cs, 0, sizeof(count->info.cs));
          count->xfb_info = NULL;
+         NIR_PASS(_, count, kk_nir_guard_threads, true);
          kk_compile_msl(pdev, count, state, &shader->gs_count,
                         &shader->info.atomic64_locked);
       } else {
@@ -1624,6 +1821,7 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
       nir->info.stage = MESA_SHADER_COMPUTE;
       memset(&nir->info.cs, 0, sizeof(nir->info.cs));
       nir->xfb_info = NULL;
+      NIR_PASS(_, nir, kk_nir_guard_threads, true);
       kk_compile_msl(pdev, nir, state, &shader->gs_main,
                      &shader->info.atomic64_locked);
 
@@ -1681,7 +1879,7 @@ kk_compile_nir_shader(struct kk_device *dev, nir_shader *nir,
    struct kk_shader *shader = NULL;
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    VkResult result =
-      kk_compile_shader(dev, nir, NULL, &rs_none, NULL, alloc, &shader);
+      kk_compile_shader(dev, nir, NULL, &rs_none, NULL, NULL, alloc, &shader);
    if (result != VK_SUCCESS)
       return result;
 
@@ -1963,7 +2161,7 @@ gather_graphics_pipeline_create_info(
 
       if (s->info.stage == MESA_SHADER_GEOMETRY) {
          kk_msl_copy(&vs->gs_main, &s->gs_main);
-         if (s->info.gs.count_words)
+         if (s->info.gs.count_words && !s->info.gs.materialize)
             kk_msl_copy(&vs->gs_count, &s->gs_count);
          if (s->info.gs.xfb)
             kk_msl_copy(&vs->gs_pre, &s->gs_pre);
@@ -2127,7 +2325,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
       if (result != VK_SUCCESS)
          return VK_ERROR_INVALID_SHADER_NV;
 
-      if (vs->info.vs.gs.count_words) {
+      if (vs->info.vs.gs.count_words && !vs->info.vs.gs.materialize) {
          result = kk_compile_compute_pipeline(device, &vs->gs_count,
                                               KK_POLY_WG_SIZE,
                                               &pipe->gfx.gs_count);
@@ -2307,10 +2505,7 @@ kk_create_passthrough_gs(struct kk_device *dev, nir_shader *prev,
       else
          key->prim = MESA_PRIM_TRIANGLES;
    } else {
-      key->prim = u_decomposed_prim(
-         vk_topology_to_mesa(state->ia->primitive_topology));
-      if (mesa_prim_has_adjacency(key->prim))
-         key->prim = u_reduced_prim(key->prim);
+      key->prim = kk_assembled_prim(state);
    }
 
    nir_builder b = nir_builder_init_simple_shader(
@@ -2445,11 +2640,19 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
    nir_opt_varyings_bulk(nir_shaders, total_shaders, true, UINT32_MAX,
                          UINT32_MAX, nir_opts, NULL);
 
+   uint8_t flat_inputs[NUM_TOTAL_VARYING_SLOTS];
+   bool vs_needs_flat =
+      state && total_shaders == 2u &&
+      nir_shaders[0]->info.stage == MESA_SHADER_VERTEX &&
+      nir_shaders[1]->info.stage == MESA_SHADER_FRAGMENT &&
+      kk_gather_flat_inputs(nir_shaders[1], flat_inputs);
+
    for (uint32_t i = 0; i < total_shaders; i++) {
       struct kk_shader *prev_stage = i > 0 ? shaders[i - 1] : NULL;
-      result =
-         kk_compile_shader(dev, nir_shaders[i], prev_stage, vertex_robustness,
-                           state, pAllocator, &shaders[i]);
+      result = kk_compile_shader(
+         dev, nir_shaders[i], prev_stage, vertex_robustness, state,
+         i == 0 && vs_needs_flat ? flat_inputs : NULL, pAllocator,
+         &shaders[i]);
 
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
@@ -2552,7 +2755,7 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
       kk_msl_serialize(&shader->gs_main, blob);
 
    const struct poly_gs_info *gs = kk_shader_gs_info(&shader->info);
-   if (gs && gs->count_words)
+   if (gs && gs->count_words && !gs->materialize)
       kk_msl_serialize(&shader->gs_count, blob);
    if (gs && gs->xfb)
       kk_msl_serialize(&shader->gs_pre, blob);
@@ -2624,7 +2827,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    }
 
    const struct poly_gs_info *gs = kk_shader_gs_info(&info);
-   if (gs && gs->count_words) {
+   if (gs && gs->count_words && !gs->materialize) {
       result = kk_msl_deserialize(blob, &shader->gs_count);
       if (result != VK_SUCCESS)
          goto fail;
