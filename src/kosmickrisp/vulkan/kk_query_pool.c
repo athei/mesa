@@ -25,6 +25,137 @@ struct kk_query_report {
    uint64_t value;
 };
 
+/* Timestamps are sampled into entries of Metal counter heaps and resolved
+ * into the pool BO by the same Metal command buffer (end_encoder), so an entry
+ * is only in use while a command buffer that samples into it can still
+ * execute; the results are read from the BO. Metal gives a process at most
+ * KK_TS_MAX_HEAPS counter heaps, so the heaps belong to the device rather
+ * than to a pool, and a pool holds only its results.
+ *
+ * Each entry is either in the device's free list or in the ts_entries of
+ * exactly one command buffer:
+ *
+ * - The thread recording a command buffer takes entries for it in
+ *   vkCmdWriteTimestamp2. The application synchronizes recording, so
+ *   ts_entries needs no lock; the free list is under timestamps.lock.
+ * - The command buffer returns them in kk_cmd_release_resources, when it is
+ *   reset (also by vkBeginCommandBuffer or vkResetCommandPool) or destroyed.
+ *   Vulkan forbids both while it is pending, so its Metal command buffer, the
+ *   GPU writes and the resolves are complete.
+ * - A command buffer submitted again is recorded once more into an internal
+ *   one with entries of its own (kk_queue.c), which the queue resets in the
+ *   completion callback, on Metal's thread, once the GPU is done with it.
+ *
+ * The heaps are created as entries run out, never released before the
+ * device, and stored before their entries enter the free list. No other lock
+ * of the driver is taken while timestamps.lock is held. */
+void
+kk_device_init_timestamps(struct kk_device *dev)
+{
+   simple_mtx_init(&dev->timestamps.lock, mtx_plain);
+   util_dynarray_init(&dev->timestamps.free, NULL);
+}
+
+void
+kk_device_finish_timestamps(struct kk_device *dev)
+{
+   for (uint32_t h = 0; h < dev->timestamps.heap_count; h++)
+      mtl_release(dev->timestamps.heaps[h]);
+   util_dynarray_fini(&dev->timestamps.free);
+   simple_mtx_destroy(&dev->timestamps.lock);
+}
+
+/* A refused heap is retried this long after, since Metal's limit counts the
+ * heaps of the whole process. */
+#define KK_TS_GROW_RETRY_NS 1000000000ull
+
+/* Add a heap and its entries to the free list, unless KK_TS_MAX_HEAPS exist
+ * or Metal refused one less than KK_TS_GROW_RETRY_NS ago. Called with the
+ * lock held. */
+static void
+kk_timestamps_grow_locked(struct kk_device *dev)
+{
+   struct util_dynarray *free_entries = &dev->timestamps.free;
+   uint32_t h = dev->timestamps.heap_count;
+   uint64_t now = os_time_get_nano();
+   mtl_counter_heap *heap = NULL;
+
+   if (h == KK_TS_MAX_HEAPS || now < dev->timestamps.next_grow_ns)
+      return;
+
+   /* The free list gets room for every entry of every heap, so returning
+    * entries never has to grow it. */
+   uint32_t cap = (h + 1) * KK_TS_HEAP_ENTRIES * sizeof(uint32_t);
+   if (util_dynarray_ensure_cap(free_entries, cap))
+      heap = mtl_new_timestamp_counter_heap(dev->mtl_handle,
+                                            KK_TS_HEAP_ENTRIES);
+
+   if (heap == NULL) {
+      dev->timestamps.next_grow_ns = now + KK_TS_GROW_RETRY_NS;
+      return;
+   }
+
+   dev->timestamps.heaps[h] = heap;
+   dev->timestamps.heap_count = h + 1;
+   for (uint32_t i = KK_TS_HEAP_ENTRIES; i > 0; i--)
+      util_dynarray_append(free_entries, h * KK_TS_HEAP_ENTRIES + i - 1);
+}
+
+/* Take a counter-heap entry for a timestamp that `cmd` samples. Returns false
+ * when every entry is held by command buffers and no heap can be added. */
+static bool
+kk_timestamp_entry_take(struct kk_cmd_buffer *cmd, mtl_counter_heap **heap,
+                        uint32_t *index)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct util_dynarray *free_entries = &dev->timestamps.free;
+   uint32_t entry;
+
+   simple_mtx_lock(&dev->timestamps.lock);
+   if (!util_dynarray_contains(free_entries, uint32_t))
+      kk_timestamps_grow_locked(dev);
+   bool found = util_dynarray_contains(free_entries, uint32_t);
+   if (found) {
+      entry = util_dynarray_pop(free_entries, uint32_t);
+   } else if (!dev->timestamps.logged) {
+      dev->timestamps.logged = true;
+      if (dev->timestamps.heap_count == 0)
+         mesa_logw("Cannot create a timestamp counter heap; timestamps read "
+                   "0 until one can be created");
+      else
+         mesa_logw("All %u timestamp counter heap entries are held by "
+                   "command buffers; timestamps read 0 until some are reset "
+                   "or destroyed",
+                   dev->timestamps.heap_count * KK_TS_HEAP_ENTRIES);
+   }
+   simple_mtx_unlock(&dev->timestamps.lock);
+
+   if (!found)
+      return false;
+
+   util_dynarray_append(&cmd->ts_entries, entry);
+   /* The heap was stored before its entries went into the free list, under
+    * the lock this entry was taken with. */
+   *heap = dev->timestamps.heaps[entry / KK_TS_HEAP_ENTRIES];
+   *index = entry % KK_TS_HEAP_ENTRIES;
+   return true;
+}
+
+void
+kk_timestamp_entries_release(struct kk_device *dev,
+                             struct util_dynarray *entries)
+{
+   uint32_t count = util_dynarray_num_elements(entries, uint32_t);
+   if (count == 0)
+      return;
+
+   simple_mtx_lock(&dev->timestamps.lock);
+   util_dynarray_append_array(&dev->timestamps.free, uint32_t, entries->data,
+                              count);
+   simple_mtx_unlock(&dev->timestamps.lock);
+   util_dynarray_clear(entries);
+}
+
 uint16_t *
 kk_pool_index_ptr(const struct kk_query_pool *pool)
 {
@@ -205,21 +336,9 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
          /* We increment as we go so we can clean up properly if we run out */
          remap_index[pool->oq.queries++] = index;
       }
-   } else if (kk_pool_is_ts(pool)) {
-      if (!pdev->settings.gpu_capture_enabled) {
-         /* Timestamps are sampled into a Metal counter heap (one entry per query)
-          * and resolved into `bo` after the GPU writes them. */
-         pool->ts.heap = mtl_new_timestamp_counter_heap(dev->mtl_handle,
-                                                        pool->vk.query_count);
-         if (pool->ts.heap == NULL) {
-            kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool),
-                                pAllocator);
-            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         }
-      } else {
-         mesa_logw(
-            "Using stub query pool because Metal GPU captures don't support counter pools\n");
-      }
+   } else if (kk_pool_is_ts(pool) && pdev->settings.gpu_capture_enabled) {
+      mesa_logw(
+         "Using stub query pool because Metal GPU captures don't support counter pools\n");
    }
 
    if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)
@@ -245,9 +364,6 @@ kk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
       for (unsigned i = 0; i < pool->oq.queries; ++i) {
          kk_query_table_remove(dev, &dev->occlusion_queries, remap_index[i]);
       }
-   } else if (kk_pool_is_ts(pool)) {
-      if (pool->ts.heap)
-         mtl_release(pool->ts.heap);
    }
 
    kk_destroy_bo(dev, pool->bo);
@@ -386,54 +502,71 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
       return;
    }
 
-   assert(pool->ts.heap);
    uint32_t count = kk_mv_query_count(cmd);
    enum mtl_render_stages mtl_stage =
       kk_pipeline_stages_to_mtl_render_stage(stage);
 
-   uint32_t heap_index = query;
+   mtl_counter_heap *heap = NULL;
+   uint32_t heap_index = 0;
 
    if (cmd->metal.render) {
       /* If we've already issued a timestamp write for a render stage, reuse it
        * because reissuing might return a 0 timestamp
        */
-      bool reused = false;
       util_dynarray_foreach(&cmd->ts_stage_map, struct kk_ts_stage_entry,
                             entry) {
-         if (entry->stage == mtl_stage && entry->heap == pool->ts.heap) {
+         if (entry->stage == mtl_stage) {
+            heap = entry->heap;
             heap_index = entry->index;
-            reused = true;
             break;
          }
       }
 
-      if (!reused) {
-         struct kk_ts_stage_entry entry = {.heap = pool->ts.heap,
+      if (heap == NULL &&
+          kk_timestamp_entry_take(cmd, &heap, &heap_index)) {
+         struct kk_ts_stage_entry entry = {.heap = heap,
                                            .stage = mtl_stage,
-                                           .index = query};
+                                           .index = heap_index};
          util_dynarray_append(&cmd->ts_stage_map, entry);
 
-         mtl_render_write_timestamp(cmd->metal.render, mtl_stage, pool->ts.heap,
-                                    query);
+         mtl_render_write_timestamp(cmd->metal.render, mtl_stage, heap,
+                                    heap_index);
       }
-   } else {
+   } else if (kk_timestamp_entry_take(cmd, &heap, &heap_index)) {
       /* compute encoder active or nothing active. If the latter, the write will
-       * create a new compute encoder.  The timestamp write needs compute work
-       * in the encoder to trigger it.  Rewrite the low half of the sentinel the
-       * report already holds, which leaves the query unavailable until the
-       * resolve lands. */
+       * create a new compute encoder.  The timestamp write needs a dispatch of
+       * its own before it (mtl_compute_write_timestamp).  This one rewrites
+       * the low half of the sentinel the report already holds, which leaves
+       * the query unavailable until the resolve lands. */
       libkk_write_u32(cmd, kk_grid_1d(1), true,
                       kk_query_report_addr(dev, pool, query),
                       (uint32_t)LIBKK_QUERY_UNAVAILABLE);
 
-      mtl_compute_write_timestamp(cmd->metal.compute, pool->ts.heap, query);
+      /* The dispatch is not encoded when its upload cannot be allocated,
+       * which leaves the command buffer in the error state. A write without
+       * it would not be performed, and its resolve would copy the timestamp
+       * of the entry's previous owner into the query. So a command buffer in
+       * the error state samples no timestamp: the query stays unavailable,
+       * and the entry goes back to the device with the others. */
+      if (vk_command_buffer_has_error(&cmd->vk))
+         return;
+
+      mtl_compute_write_timestamp(cmd->metal.compute, heap, heap_index);
+   }
+
+   if (heap == NULL) {
+      /* No entry: make the queries available with a timestamp of 0, one
+       * 64-bit store each, so that no reader sees a report that is neither
+       * the sentinel nor the value. */
+      emit_zero_queries(cmd, pool, query, count, true);
+      return;
    }
 
    /* Resolve the Metal timestamp value to all multiview query indices so that
     * they all become available. */
    for (uint32_t i = 0; i < count; i++) {
       struct kk_ts_resolve resolve = {
-         .heap = pool->ts.heap,
+         .heap = heap,
          .index = heap_index,
          .dst_addr = kk_query_report_addr(dev, pool, query + i),
       };

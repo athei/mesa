@@ -90,6 +90,23 @@ struct kk_device {
    struct kk_sampler_heap samplers;
    struct kk_query_table occlusion_queries;
 
+   /* The Metal counter heaps that the timestamp queries of every pool of the
+    * device are sampled into, created as needed (see kk_query_pool.c). */
+   struct {
+      simple_mtx_t lock;
+      mtl_counter_heap *heaps[KK_TS_MAX_HEAPS];
+      uint32_t heap_count;
+      /* No heap is tried before this os_time_get_nano() time, set when
+       * Metal refused one */
+      uint64_t next_grow_ns;
+      /* Set once a timestamp found no free entry and said so; logged once
+       * per device */
+      bool logged;
+      /* Entries no command buffer holds, as uint32_t heap index *
+       * KK_TS_HEAP_ENTRIES + entry index */
+      struct util_dynarray free;
+   } timestamps;
+
    /* Track all heaps the user allocated so we can set them all as resident when
     * recording as required by Metal. */
    struct kk_residency_set residency_set;

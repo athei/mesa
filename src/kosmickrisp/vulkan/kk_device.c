@@ -15,6 +15,7 @@
 #include "kk_image_view.h"
 #include "kk_instance.h"
 #include "kk_physical_device.h"
+#include "kk_query_pool.h"
 #include "kk_shader.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
@@ -294,6 +295,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
    dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
    dev->vk.get_timestamp = kk_get_timestamp;
+   kk_device_init_timestamps(dev);
 
    /* Create a new Metal pipeline compiler for the device */
    dev->mtl_compiler_handle = kk_acquire_compiler(dev);
@@ -357,6 +359,7 @@ fail_vab_memory:
 fail_compiler:
    kk_release_compiler(dev);
 fail_init:
+   kk_device_finish_timestamps(dev);
    vk_device_finish(&dev->vk);
 fail_alloc:
    vk_free(&dev->vk.alloc, dev);
@@ -391,6 +394,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       kk_queue_finish(dev, &dev->queue);
       dev->has_queue = false;
    }
+
+   /* After the queue, whose command buffers return their timestamp entries */
+   kk_device_finish_timestamps(dev);
 
    /* Release the residency set last once all BOs are released. */
    mtl_release(dev->residency_set.handle);
