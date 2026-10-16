@@ -273,6 +273,7 @@ struct kk_cmd_buffer {
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
+   bool keep_heap;
    /* Set at vkBeginCommandBuffer. One-time-submit buffers skip command
     * enqueueing in the trampolines since they can never be replayed. */
    bool one_time_submit;
@@ -331,7 +332,8 @@ kk_cmd_buffer_dirty_all_gfx(struct kk_cmd_buffer *cmd)
    /* We just flushed out the heap use. If we want to use it again, we'll need
     * to queue a free for it again.
     */
-   cmd->uses_heap = false;
+   if (!cmd->keep_heap)
+      cmd->uses_heap = false;
 }
 
 void kk_cmd_release_dynamic_ds_state(struct kk_cmd_buffer *cmd);

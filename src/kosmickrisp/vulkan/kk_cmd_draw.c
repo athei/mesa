@@ -1258,8 +1258,7 @@ kk_upload_tess_params(struct kk_cmd_buffer *cmd, struct poly_tess_params *out,
       args.counts = addr + count_offs;
    } else {
       /* Allocate 3x indirect global+local grids for VS/TCS/tess */
-      uint32_t grid_stride = sizeof(uint32_t) * 3;
-      gfx->tess.indirect_ptr = kk_pool_alloc(cmd, grid_stride * 3, 4);
+      gfx->tess.indirect_ptr = kk_pool_alloc(cmd, sizeof(uint32_t) * 15, 4);
 
       struct kk_ptr ptr = kk_pool_alloc(cmd, draw_stride_B, 4);
       gfx->tess.out_draws_addr = ptr.gpu;
@@ -2111,6 +2110,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
          .vp = gfx->per_draw_data.vertex_params,
          .vertex_outputs = vs->info.outputs_written,
          .tcs_statistic = 0,
+         .vs_wg_size = KK_POLY_WG_SIZE,
       };
 
       if (draw.index.el_size_B) {
@@ -2122,12 +2122,10 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
 
       libkk_tess_setup_indirect_struct(cmd, kk_grid_1d(1), true, args);
 
-      uint32_t grid_stride = sizeof(uint32_t) * 3;
-      grid_vs = kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 0u * grid_stride);
-      grid_tcs =
-         kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 1u * grid_stride);
-      grid_tess =
-         kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 2u * grid_stride);
+      uint64_t grids = gfx->tess.indirect_ptr.gpu;
+      grid_vs = kk_grid_indirect_local(grids);
+      grid_tcs = kk_grid_indirect_local(grids + 6u * sizeof(uint32_t));
+      grid_tess = kk_grid_indirect(grids + 12u * sizeof(uint32_t));
    } else {
       uint32_t patches = draw.grid.size.x / input_patch_size;
       grid_vs = grid_tcs = kk_grid_2d(draw.grid.size.x, draw.grid.size.y);
@@ -2374,6 +2372,9 @@ kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
    if (gs_restart && !kk_convert_to_indirect_draw(cmd, data))
       return;
 
+   bool keep_heap = cmd->keep_heap;
+   cmd->keep_heap |= cmd->uses_heap;
+
    for (uint32_t i = 0; i < data->draw_count; i++) {
       struct kk_draw_data draw_data = build_draw_data(cmd, data, i);
       uint64_t root = roots && roots->base ? roots->base + i * roots->stride_B : 0;
@@ -2400,6 +2401,8 @@ kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
 
       kk_dispatch_draw(cmd, draw_data);
    }
+
+   cmd->keep_heap = keep_heap;
 }
 
 static void
@@ -2790,18 +2793,24 @@ kk_cmd_draw_generated(struct kk_cmd_buffer *cmd,
    kk_set_draw_state(cmd, &data);
 
    if (params.has_ib && data.indexed) {
+      bool emulated = cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
+                      cmd->state.shaders[MESA_SHADER_GEOMETRY];
+
       libkk_dgc_unroll(cmd, kk_grid_1d(1024 * info->maxSequenceCount), true,
                        kk_heap(cmd), bufs.cmds, bufs.unrolled, bufs.ib_info,
-                       bufs.cmd_stride_B / 4, data.restart, data.flatshade_first,
-                       data.prim);
+                       bufs.cmd_stride_B / 4, data.restart,
+                       emulated ? 1 : data.flatshade_first,
+                       emulated ? MESA_PRIM_POINTS : data.prim);
 
-      data.prim = u_decomposed_prim(data.prim);
+      if (!emulated)
+         data.prim = u_decomposed_prim(data.prim);
       data.index_buffer.addr = dev->heap->gpu + sizeof(struct poly_heap);
       data.index_buffer.range = dev->heap->size_B - sizeof(struct poly_heap);
       data.index_buffer_el_size_B = 4u;
       data.restart_index = UINT32_MAX;
       data.restart = false;
-      data.flatshade_first = true;
+      if (!emulated)
+         data.flatshade_first = true;
       data.unrolled = true;
       data.indirect_command.addr = bufs.unrolled;
       data.indirect_command.stride = sizeof(VkDrawIndexedIndirectCommand);

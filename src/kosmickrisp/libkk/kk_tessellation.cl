@@ -17,7 +17,7 @@ libkk_tess_setup_indirect(
    uint32_t in_index_size_B, uint64_t vertex_outputs /* bitfield */,
 
    /* Tess control invocation counter if active, else zero */
-   global uint32_t *tcs_statistic)
+   global uint32_t *tcs_statistic, uint32_t vs_wg_size)
 {
    uint count = indirect[0], instance_count = indirect[1];
    unsigned in_patches = count / p->input_patch_size;
@@ -80,14 +80,20 @@ libkk_tess_setup_indirect(
    grids[0] = count;
    grids[1] = instance_count;
    grids[2] = 1;
-
-   /* TCS grid size */
-   grids[3] = in_patches * p->output_patch_size;
-   grids[4] = instance_count;
+   grids[3] = vs_wg_size;
+   grids[4] = 1;
    grids[5] = 1;
 
-   /* Tess grid size */
-   grids[6] = unrolled_patches;
-   grids[7] = 1;
+   /* TCS grid size */
+   grids[6] = in_patches * p->output_patch_size;
+   grids[7] = instance_count;
    grids[8] = 1;
+   grids[9] = p->output_patch_size;
+   grids[10] = 1;
+   grids[11] = 1;
+
+   /* Tess grid size */
+   grids[12] = unrolled_patches;
+   grids[13] = 1;
+   grids[14] = 1;
 }
