@@ -46,6 +46,10 @@ struct poly_gs_info {
 
    /* Static topology used if shape = POLY_GS_SHAPE_STATIC_INDEXED */
    uint8_t topology[64];
+
+   unsigned invocations;
+   int16_t static_count[4];
+   int8_t count_index[4];
 };
 
 bool poly_nir_lower_gs(struct nir_shader *gs, struct nir_shader **gs_count,

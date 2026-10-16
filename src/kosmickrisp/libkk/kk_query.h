@@ -18,4 +18,10 @@ struct libkk_imm_write {
 
 #define LIBKK_QUERY_UNAVAILABLE (uint64_t)((int64_t)-1)
 
+struct libkk_stats_draw {
+   DEVICE(uint32_t) draw;
+   uint32_t prim;
+   uint32_t patch_size;
+};
+
 #endif /* KK_QUERY_H */

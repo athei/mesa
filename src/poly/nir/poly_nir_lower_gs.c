@@ -1434,7 +1434,10 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
    for (unsigned i = 0; i < ARRAY_SIZE(gs_state.count_index); ++i) {
       key.count_index[i] = gs_state.count_index[i];
       key.static_count[i] = gs_state.static_count[i];
+      info->count_index[i] = gs_state.count_index[i];
+      info->static_count[i] = gs_state.static_count[i];
    }
+   info->invocations = gs->info.gs.invocations;
 
    if (xfb) {
       key.buffers_written = xfb->buffers_written;
