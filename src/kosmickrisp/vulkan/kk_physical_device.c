@@ -802,9 +802,7 @@ kk_get_device_properties(
          VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT |
          VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT,
       .supportedIndirectCommandsShaderStages =
-         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
-         VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+         VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT,
       .supportedIndirectCommandsShaderStagesPipelineBinding = 0,
       .supportedIndirectCommandsShaderStagesShaderBinding = 0,
       .deviceGeneratedCommandsTransformFeedback = false,

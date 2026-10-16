@@ -172,6 +172,7 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
 
    memset(&cmd->state, 0, sizeof(cmd->state));
    cmd->uses_heap = false;
+   cmd->keep_heap = false;
 }
 
 static void
