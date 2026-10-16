@@ -211,6 +211,8 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 #define KK_SAMPLER_MINMAX_UNNORMALIZED 0x20
 
 bool kk_nir_lower_custom_border(nir_shader *nir);
+bool kk_nir_lower_compute_derivatives(nir_shader *nir);
+bool kk_nir_lower_compute_lod_queries(nir_shader *nir);
 bool kk_nir_lower_sampler_minmax(nir_shader *nir);
 bool kk_nir_lower_ssbo_residency(nir_shader *nir,
                                  nir_address_format addr_format, bool guard);
