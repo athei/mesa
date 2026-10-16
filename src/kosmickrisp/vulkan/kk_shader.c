@@ -81,6 +81,9 @@ kk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir,
    nir_lower_compute_system_values_options csv_options = {
       .has_base_global_invocation_id = 0,
       .has_base_workgroup_id = true,
+      .shuffle_local_ids_for_quad_derivatives = true,
+      .lower_local_invocation_index =
+         nir->info.derivative_group == DERIVATIVE_GROUP_QUADS,
    };
    NIR_PASS(_, nir, nir_lower_compute_system_values, &csv_options);
 }
@@ -734,9 +737,17 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);
 
+   if (nir->info.stage == MESA_SHADER_COMPUTE &&
+       nir->info.derivative_group != DERIVATIVE_GROUP_NONE) {
+      const nir_lower_tex_options txp_options = {.lower_txp = ~0u};
+      NIR_PASS(_, nir, nir_lower_tex, &txp_options);
+      NIR_PASS(_, nir, kk_nir_lower_compute_derivatives);
+   }
+
    /* Common msl texture lowering needs to happen after ycbcr lowering and
     * before descriptor lowering. */
    NIR_PASS(_, nir, msl_lower_textures, pdev->info.gpu_apple_family < 10);
+   NIR_PASS(_, nir, kk_nir_lower_compute_lod_queries);
 
    /* Lower push constants before lower_descriptors */
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
