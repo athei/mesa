@@ -37,6 +37,13 @@
 #include "egl_dri2.h"
 #include "eglglobals.h"
 #include "kopper_interface.h"
+
+#ifdef VK_USE_PLATFORM_METAL_EXT
+#include <CoreGraphics/CGGeometry.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <vulkan/vulkan_metal.h>
+#endif
 #include "loader.h"
 #include "loader_dri_helper.h"
 #include "dri_util.h"
@@ -106,9 +113,39 @@ surfaceless_image_get_buffers(struct dri_drawable *driDrawable, unsigned int for
    return 1;
 }
 
+#ifdef VK_USE_PLATFORM_METAL_EXT
+static void
+surfaceless_metal_layer_size(void *layer, EGLint *width, EGLint *height)
+{
+   CGRect bounds =
+      ((CGRect(*)(id, SEL))objc_msgSend)((id)layer, sel_registerName("bounds"));
+   CGFloat scale = ((CGFloat(*)(id, SEL))objc_msgSend)(
+      (id)layer, sel_registerName("contentsScale"));
+
+   *width = MAX2(bounds.size.width * scale, 1);
+   *height = MAX2(bounds.size.height * scale, 1);
+}
+
+/* A window surface holds a reference to its layer, which the application may
+ * release once eglDestroySurface returns, while the surface itself lives on
+ * until no context has it current. */
+static void
+surfaceless_metal_layer_retain(void *layer)
+{
+   ((id(*)(id, SEL))objc_msgSend)((id)layer, sel_registerName("retain"));
+}
+
+static void
+surfaceless_metal_layer_release(void *layer)
+{
+   ((void(*)(id, SEL))objc_msgSend)((id)layer, sel_registerName("release"));
+}
+#endif
+
 static _EGLSurface *
 dri2_surfaceless_create_surface(_EGLDisplay *disp, EGLint type,
-                                _EGLConfig *conf, const EGLint *attrib_list)
+                                _EGLConfig *conf, void *native_window,
+                                const EGLint *attrib_list)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_config *dri2_conf = dri2_egl_config(conf);
@@ -126,26 +163,39 @@ dri2_surfaceless_create_surface(_EGLDisplay *disp, EGLint type,
    }
 
    if (!dri2_init_surface(&dri2_surf->base, disp, type, conf, attrib_list,
-                          false, NULL))
+                          false, native_window))
       goto cleanup_surface;
+
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (type == EGL_WINDOW_BIT) {
+      surfaceless_metal_layer_retain(native_window);
+      surfaceless_metal_layer_size(native_window, &dri2_surf->base.Width,
+                                   &dri2_surf->base.Height);
+   }
+#endif
 
    config = dri2_get_dri_config(dri2_conf, type, dri2_surf->base.GLColorspace);
 
    if (!config) {
       _eglError(EGL_BAD_MATCH,
                 "Unsupported surfacetype/colorspace configuration");
-      goto cleanup_surface;
+      goto cleanup_layer;
    }
 
    dri2_surf->visual = dri2_image_format_for_pbuffer_config(dri2_dpy, config);
    if (dri2_surf->visual == PIPE_FORMAT_NONE)
-      goto cleanup_surface;
+      goto cleanup_layer;
 
    if (!dri2_create_drawable(dri2_dpy, config, dri2_surf, dri2_surf))
-      goto cleanup_surface;
+      goto cleanup_layer;
 
    return &dri2_surf->base;
 
+cleanup_layer:
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (type == EGL_WINDOW_BIT)
+      surfaceless_metal_layer_release(native_window);
+#endif
 cleanup_surface:
    free(dri2_surf);
    return NULL;
@@ -160,6 +210,11 @@ surfaceless_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
 
    driDestroyDrawable(dri2_surf->dri_drawable);
 
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (surf->Type == EGL_WINDOW_BIT)
+      surfaceless_metal_layer_release(surf->NativeSurface);
+#endif
+
    dri2_fini_surface(surf);
    free(dri2_surf);
    return EGL_TRUE;
@@ -169,7 +224,7 @@ static _EGLSurface *
 dri2_surfaceless_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf,
                                         const EGLint *attrib_list)
 {
-   return dri2_surfaceless_create_surface(disp, EGL_PBUFFER_BIT, conf,
+   return dri2_surfaceless_create_surface(disp, EGL_PBUFFER_BIT, conf, NULL,
                                           attrib_list);
 }
 
@@ -178,6 +233,120 @@ static const struct dri2_egl_display_vtbl dri2_surfaceless_display_vtbl = {
    .destroy_surface = surfaceless_destroy_surface,
    .create_image = dri2_create_image_khr,
 };
+
+#ifdef VK_USE_PLATFORM_METAL_EXT
+static EGLBoolean
+surfaceless_kopper_swap_interval(_EGLDisplay *disp, _EGLSurface *surf,
+                                 EGLint interval)
+{
+   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
+
+   if (surf->Type == EGL_WINDOW_BIT)
+      kopperSetSwapInterval(dri2_surf->dri_drawable, interval);
+   return EGL_TRUE;
+}
+
+static _EGLSurface *
+dri2_surfaceless_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                                       void *native_window,
+                                       const EGLint *attrib_list)
+{
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+   _EGLSurface *surf;
+
+   if (!native_window) {
+      _eglError(EGL_BAD_NATIVE_WINDOW, "eglCreateWindowSurface");
+      return NULL;
+   }
+
+   surf = dri2_surfaceless_create_surface(disp, EGL_WINDOW_BIT, conf,
+                                          native_window, attrib_list);
+   if (surf != NULL) {
+      surf->SwapInterval = dri2_dpy->default_swap_interval;
+      surfaceless_kopper_swap_interval(disp, surf,
+                                       dri2_dpy->default_swap_interval);
+   }
+   return surf;
+}
+
+static EGLBoolean
+surfaceless_kopper_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+                                const EGLint *rects, EGLint n_rects)
+{
+   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
+
+   if (draw->Type != EGL_WINDOW_BIT)
+      return EGL_TRUE;
+
+   kopperSwapBuffers(dri2_surf->dri_drawable,
+                     __DRI2_FLUSH_CONTEXT | __DRI2_FLUSH_INVALIDATE_ANCILLARY,
+                     n_rects, rects);
+   kopperQuerySurfaceSize(dri2_surf->dri_drawable, &dri2_surf->base.Width,
+                          &dri2_surf->base.Height);
+   return EGL_TRUE;
+}
+
+static EGLint
+surfaceless_kopper_query_buffer_age(_EGLDisplay *disp, _EGLSurface *surf)
+{
+   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
+
+   return surf->Type == EGL_WINDOW_BIT
+             ? kopperQueryBufferAge(dri2_surf->dri_drawable)
+             : 0;
+}
+
+static const struct dri2_egl_display_vtbl dri2_surfaceless_metal_display_vtbl = {
+   .create_window_surface = dri2_surfaceless_create_window_surface,
+   .create_pbuffer_surface = dri2_surfaceless_create_pbuffer_surface,
+   .destroy_surface = surfaceless_destroy_surface,
+   .create_image = dri2_create_image_khr,
+   .swap_interval = surfaceless_kopper_swap_interval,
+   .swap_buffers = surfaceless_kopper_swap_buffers,
+   .query_buffer_age = surfaceless_kopper_query_buffer_age,
+};
+
+static_assert(sizeof(struct kopper_vk_surface_create_storage) >=
+                 sizeof(VkMetalSurfaceCreateInfoEXT),
+              "");
+
+static void
+surfaceless_kopper_set_surface_create_info(void *_draw,
+                                           struct kopper_loader_info *ci)
+{
+   struct dri2_egl_surface *dri2_surf = _draw;
+   VkMetalSurfaceCreateInfoEXT *metal = (VkMetalSurfaceCreateInfoEXT *)&ci->bos;
+
+   if (dri2_surf->base.Type != EGL_WINDOW_BIT)
+      return;
+
+   metal->sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
+   metal->pNext = NULL;
+   metal->flags = 0;
+   metal->pLayer = dri2_surf->base.NativeSurface;
+   ci->has_alpha = dri2_surf->base.Config->AlphaSize > 0;
+   ci->present_opaque = dri2_surf->base.PresentOpaque;
+}
+
+static void
+surfaceless_kopper_get_drawable_info(struct dri_drawable *draw, int *w, int *h,
+                                     void *loaderPrivate)
+{
+   struct dri2_egl_surface *dri2_surf = loaderPrivate;
+
+   if (dri2_surf->base.Type == EGL_WINDOW_BIT)
+      surfaceless_metal_layer_size(dri2_surf->base.NativeSurface,
+                                   &dri2_surf->base.Width,
+                                   &dri2_surf->base.Height);
+   *w = dri2_surf->base.Width;
+   *h = dri2_surf->base.Height;
+}
+
+static const __DRIkopperLoaderExtension kopper_metal_loader_extension = {
+   .SetSurfaceCreateInfo = surfaceless_kopper_set_surface_create_info,
+   .GetDrawableInfo = surfaceless_kopper_get_drawable_info,
+};
+#endif
 
 static void
 surfaceless_flush_front_buffer(struct dri_drawable *driDrawable, void *loaderPrivate)
@@ -217,7 +386,11 @@ static const struct dri_loader_funcs swrast_loader_funcs = {
 
 static const struct dri_loader_funcs kopper_loader_funcs = {
    .image_lookup = &image_lookup_extension,
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   .kopper = &kopper_metal_loader_extension,
+#else
    .kopper = &kopper_pbuffer_loader_extension,
+#endif
 };
 
 static bool
@@ -389,7 +562,7 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
     */
    driver_loaded = surfaceless_probe_device(disp, disp->Options.ForceSoftware,
                                             disp->Options.Zink);
-   if (!driver_loaded && disp->Options.ForceSoftware) {
+   if (!driver_loaded && (disp->Options.ForceSoftware || disp->Options.Zink)) {
       _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
       driver_loaded = surfaceless_probe_device_sw(disp);
    }
@@ -408,12 +581,23 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
 #endif
    dri2_set_WL_bind_wayland_display(disp);
 
-   dri2_add_pbuffer_configs_for_visuals(disp);
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (dri2_dpy->kopper) {
+      dri2_setup_swap_interval(disp, 1);
+      dri2_add_configs_for_visuals(disp, EGL_WINDOW_BIT | EGL_PBUFFER_BIT);
+      disp->Extensions.EXT_present_opaque = EGL_TRUE;
+   } else
+#endif
+      dri2_add_pbuffer_configs_for_visuals(disp);
 
    /* Fill vtbl last to prevent accidentally calling virtual function during
     * initialization.
     */
    dri2_dpy->vtbl = &dri2_surfaceless_display_vtbl;
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (dri2_dpy->kopper)
+      dri2_dpy->vtbl = &dri2_surfaceless_metal_display_vtbl;
+#endif
 
    return EGL_TRUE;
 

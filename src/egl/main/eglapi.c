@@ -1054,8 +1054,12 @@ _eglCreateWindowSurfaceCommon(_EGLDisplay *disp, EGLConfig config,
    if (native_window == NULL)
       RETURN_EGL_ERROR(disp, EGL_BAD_NATIVE_WINDOW, EGL_NO_SURFACE);
 
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (disp && disp->Platform == _EGL_PLATFORM_DEVICE) {
+#else
    if (disp && (disp->Platform == _EGL_PLATFORM_SURFACELESS ||
                 disp->Platform == _EGL_PLATFORM_DEVICE)) {
+#endif
       /* From the EGL_MESA_platform_surfaceless spec (v1):
        *
        *    eglCreatePlatformWindowSurface fails when called with a <display>

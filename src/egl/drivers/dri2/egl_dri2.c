@@ -490,38 +490,61 @@ dri2_pbuffer_visual_index(enum pipe_format format)
    return -1;
 }
 
+/* Adds a config for each driver config in one of dri2_pbuffer_visuals.
+ *
+ * Configs for window surfaces also take the sRGB variants of those formats,
+ * and the ones with 8 bits per color channel come first. eglChooseConfig
+ * sorts by itself, but a caller that keeps the order of eglGetConfigs, like
+ * the WGL pixel formats of Wine, would otherwise offer the 10-bit configs
+ * first, and those have no sRGB variant.
+ */
 void
-dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
+dri2_add_configs_for_visuals(_EGLDisplay *disp, EGLint surface_type)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    unsigned int format_count[ARRAY_SIZE(dri2_pbuffer_visuals)] = {0};
+   const bool window = surface_type & EGL_WINDOW_BIT;
+   const unsigned passes = window ? 2 : 1;
 
-   for (unsigned i = 0; dri2_dpy->driver_configs[i] != NULL; i++) {
-      struct dri2_egl_config *dri2_conf;
-      EGLint config_group = 0;
-      struct gl_config *gl_config =
-         (struct gl_config *) dri2_dpy->driver_configs[i];
-      int idx = dri2_pbuffer_visual_index(gl_config->color_format);
+   for (unsigned pass = 0; pass < passes; pass++) {
+      for (unsigned i = 0; dri2_dpy->driver_configs[i] != NULL; i++) {
+         struct dri2_egl_config *dri2_conf;
+         EGLint config_group = 0;
+         struct gl_config *gl_config =
+            (struct gl_config *) dri2_dpy->driver_configs[i];
+         enum pipe_format format = gl_config->color_format;
 
-      if (idx == -1)
-         continue;
+         if (window) {
+            format = util_format_linear(format);
+            bool rgb8 = util_format_get_component_bits(
+                           format, UTIL_FORMAT_COLORSPACE_RGB, 0) == 8;
+            if (rgb8 != (pass == 0))
+               continue;
+         }
 
-      /* Put the 16 bpc rgb[a] unorm formats into a lower priority EGL config
-       * group 1, so they don't get preferably chosen by eglChooseConfig().
-       */
-      if (util_format_is_unorm16(util_format_description(gl_config->color_format)))
-         config_group = 1;
+         int idx = dri2_pbuffer_visual_index(format);
 
-      const EGLint attr_list[] = {
-         EGL_CONFIG_SELECT_GROUP_EXT,
-         config_group,
-         EGL_NONE,
-      };
+         if (idx == -1)
+            continue;
 
-      dri2_conf = dri2_add_config(disp, dri2_dpy->driver_configs[i],
-                                  EGL_PBUFFER_BIT, attr_list);
-      if (dri2_conf)
-         format_count[idx]++;
+         /* Put the 16 bpc rgb[a] unorm formats into a lower priority EGL
+          * config group 1, so they don't get preferably chosen by
+          * eglChooseConfig().
+          */
+         if (util_format_is_unorm16(util_format_description(gl_config->color_format)))
+            config_group = 1;
+
+         const EGLint attr_list[] = {
+            EGL_CONFIG_SELECT_GROUP_EXT,
+            config_group,
+            EGL_NONE,
+         };
+
+         dri2_conf = dri2_add_config(disp, dri2_dpy->driver_configs[i],
+                                     surface_type, attr_list);
+         if (dri2_conf)
+            format_count[idx]++;
+      }
    }
 
    for (unsigned i = 0; i < ARRAY_SIZE(format_count); i++) {
@@ -530,6 +553,12 @@ dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
                  util_format_name(dri2_pbuffer_visuals[i]));
       }
    }
+}
+
+void
+dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
+{
+   dri2_add_configs_for_visuals(disp, EGL_PBUFFER_BIT);
 }
 
 GLboolean
