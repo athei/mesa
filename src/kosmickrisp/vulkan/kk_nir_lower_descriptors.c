@@ -426,7 +426,16 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intr,
       .access = nir_intrinsic_access(intr) | var->data.access,
       .flags = msl_convert_access_flag(var->data.access));
 
+   nir_def *atomic64 = NULL;
+   if (nir_intrinsic_has_atomic_op(intr) && intr->def.bit_size == 64) {
+      atomic64 = load_resource_deref_desc(
+         b, 1, 32, deref,
+         offsetof(struct kk_storage_image_descriptor, buffer_size_el), ctx);
+   }
+
    nir_rewrite_image_intrinsic(intr, handle, nir_image_intrinsic_type_bindless);
+   if (atomic64)
+      nir_src_rewrite(&intr->src[2], atomic64);
 
    return true;
 }
