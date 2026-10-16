@@ -346,9 +346,12 @@ nir_atan2(nir_builder *b, nir_def *y, nir_def *x)
    const double huge_val = bit_size >= 32 ? 1e18 : 16384;
    nir_def *scale = nir_bcsel(b, nir_fge_imm(b, nir_fabs(b, t), huge_val),
                               nir_imm_floatN_t(b, 0.25, bit_size), one);
+   unsigned scaled_fp_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_exact;
    nir_def *rcp_scaled_t = nir_frcp(b, nir_fmul(b, t, scale));
    nir_def *abs_s_over_t = nir_fmul(b, nir_fabs(b, nir_fmul(b, s, scale)),
                                     nir_fabs(b, rcp_scaled_t));
+   b->fp_math_ctrl = scaled_fp_math_ctrl;
 
    /* For |x| = |y| assume tan = 1 even if infinite (i.e. pretend momentarily
     * that ∞/∞ = 1) in order to comply with the rather artificial rules
