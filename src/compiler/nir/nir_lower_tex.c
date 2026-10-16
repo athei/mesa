@@ -112,7 +112,7 @@ static nir_def *
 build_texture_size(nir_builder *b, nir_tex_instr *tex,
                    const nir_lower_tex_options *options)
 {
-   return options->build_txs_lod0 != NULL ?
+   return options != NULL && options->build_txs_lod0 != NULL ?
       options->build_txs_lod0(b, tex, options->callback_data) :
       nir_get_texture_size(b, tex);
 }
@@ -703,12 +703,11 @@ replace_gradient_with_lod(nir_builder *b, nir_def *lod, nir_tex_instr *tex)
    tex->op = nir_texop_txl;
 }
 
-static void
-lower_gradient_cube_map(nir_builder *b, nir_tex_instr *tex,
-                        const nir_lower_tex_options *options)
+static nir_def *
+gradient_cube_map_lod(nir_builder *b, nir_tex_instr *tex,
+                      const nir_lower_tex_options *options)
 {
    assert(tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE);
-   assert(tex->op == nir_texop_txd);
 
    /* Use textureSize() to get the width and height of LOD 0 */
    nir_def *size = nir_i2f32(b,
@@ -847,22 +846,16 @@ lower_gradient_cube_map(nir_builder *b, nir_tex_instr *tex,
                         nir_imm_float(b, 0.5f),
                         nir_flog2(b, nir_fmul(b, L, nir_fmul(b, L, M)))));
 
-   /* 3. Replace the gradient instruction with an equivalent lod instruction */
-   replace_gradient_with_lod(b, lod, tex);
+   return lod;
 }
 
-static void
-lower_gradient(nir_builder *b, nir_tex_instr *tex,
-               const nir_lower_tex_options *options)
+static nir_def *
+gradient_lod(nir_builder *b, nir_tex_instr *tex,
+             const nir_lower_tex_options *options)
 {
    /* Cubes are more complicated and have their own function */
-   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
-      lower_gradient_cube_map(b, tex, options);
-      return;
-   }
-
-   assert(tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE);
-   assert(tex->op == nir_texop_txd);
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+      return gradient_cube_map_lod(b, tex, options);
 
    /* Use textureSize() to get the width and height of LOD 0 */
    unsigned component_mask;
@@ -905,10 +898,23 @@ lower_gradient(nir_builder *b, nir_tex_instr *tex,
    }
 
    /* lod = log2(rho).  We're ignoring GL state biases for now. */
-   nir_def *lod = nir_flog2(b, rho);
+   return nir_flog2(b, rho);
+}
+
+nir_def *
+nir_tex_gradient_lod(nir_builder *b, nir_tex_instr *tex)
+{
+   return gradient_lod(b, tex, NULL);
+}
+
+static void
+lower_gradient(nir_builder *b, nir_tex_instr *tex,
+               const nir_lower_tex_options *options)
+{
+   assert(tex->op == nir_texop_txd);
 
    /* Replace the gradient instruction with an equivalent lod instruction */
-   replace_gradient_with_lod(b, lod, tex);
+   replace_gradient_with_lod(b, gradient_lod(b, tex, options), tex);
 }
 
 /* tex(s, coord) = txd(s, coord, dfdx(coord), dfdy(coord)) */

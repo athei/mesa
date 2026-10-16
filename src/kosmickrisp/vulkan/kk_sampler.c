@@ -254,28 +254,29 @@ kk_CreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
                                ? _mesa_float_to_half(pCreateInfo->mipLodBias)
                                : 0;
 
+   sampler->minmax_flags =
+      (pCreateInfo->minFilter == VK_FILTER_LINEAR
+          ? KK_SAMPLER_MINMAX_MIN_LINEAR
+          : 0) |
+      (pCreateInfo->magFilter == VK_FILTER_LINEAR
+          ? KK_SAMPLER_MINMAX_MAG_LINEAR
+          : 0) |
+      (pCreateInfo->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR
+          ? KK_SAMPLER_MINMAX_MIP_LINEAR
+          : 0) |
+      (pCreateInfo->unnormalizedCoordinates ? KK_SAMPLER_MINMAX_UNNORMALIZED
+                                            : 0);
+
    const VkSamplerReductionModeCreateInfo *reduction_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            SAMPLER_REDUCTION_MODE_CREATE_INFO);
    if (reduction_info && !kk_has_native_sampler_minmax(pdev) &&
        reduction_info->reductionMode !=
           VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE) {
-      sampler->minmax_flags =
-         (reduction_info->reductionMode == VK_SAMPLER_REDUCTION_MODE_MIN
-             ? KK_SAMPLER_MINMAX_MIN
-             : KK_SAMPLER_MINMAX_MAX) |
-         (pCreateInfo->minFilter == VK_FILTER_LINEAR
-             ? KK_SAMPLER_MINMAX_MIN_LINEAR
-             : 0) |
-         (pCreateInfo->magFilter == VK_FILTER_LINEAR
-             ? KK_SAMPLER_MINMAX_MAG_LINEAR
-             : 0) |
-         (pCreateInfo->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR
-             ? KK_SAMPLER_MINMAX_MIP_LINEAR
-             : 0) |
-         (pCreateInfo->unnormalizedCoordinates
-             ? KK_SAMPLER_MINMAX_UNNORMALIZED
-             : 0);
+      sampler->minmax_flags |=
+         reduction_info->reductionMode == VK_SAMPLER_REDUCTION_MODE_MIN
+            ? KK_SAMPLER_MINMAX_MIN
+            : KK_SAMPLER_MINMAX_MAX;
    }
 
    *pSampler = kk_sampler_to_handle(sampler);

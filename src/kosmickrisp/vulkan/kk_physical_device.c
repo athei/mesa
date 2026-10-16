@@ -143,6 +143,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       /* Optional extensions */
       .KHR_calibrated_timestamps = true,
+      .KHR_compute_shader_derivatives = true,
       .KHR_deferred_host_operations = true,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
@@ -399,6 +400,10 @@ kk_get_device_features(
       .robustBufferAccess2 = true,
       .robustImageAccess2 = true,
       .nullDescriptor = true,
+
+      /* VK_KHR_compute_shader_derivatives */
+      .computeDerivativeGroupQuads = true,
+      .computeDerivativeGroupLinear = true,
 
       /* VK_KHR_shader_expect_assume */
       .shaderExpectAssume = true,
@@ -791,6 +796,9 @@ kk_get_device_properties(
       .uniformTexelBufferOffsetAlignmentBytes = KK_MIN_TEXEL_BUFFER_ALIGNMENT,
       .uniformTexelBufferOffsetSingleTexelAlignment = true,
       .maxBufferSize = pdev->info.max_buffer_size,
+
+      /* VK_KHR_compute_shader_derivatives */
+      .meshAndTaskShaderDerivatives = false,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = KK_MAX_PUSH_DESCRIPTORS,
