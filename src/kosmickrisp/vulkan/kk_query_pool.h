@@ -12,12 +12,8 @@
 
 #include "vulkan/runtime/vk_query_pool.h"
 
-struct kk_ts_state {
-   /* Metal 4 counter heap backing VK_QUERY_TYPE_TIMESTAMP pools. Timestamps are
-    * sampled into this heap and later resolved into `bo` (see kk_query_pool.c).
-    * NULL for non-timestamp pools. */
-   mtl_counter_heap *heap;
-};
+struct kk_device;
+struct util_dynarray;
 
 struct kk_oq_state {
    unsigned queries;
@@ -32,15 +28,17 @@ struct kk_query_pool {
    uint32_t query_start;
    uint32_t query_stride;
 
-   union {
-      struct kk_ts_state ts;
-      struct kk_oq_state oq;
-   };
+   struct kk_oq_state oq;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_query_pool, vk.base, VkQueryPool,
                                VK_OBJECT_TYPE_QUERY_POOL)
 
 uint16_t *kk_pool_index_ptr(const struct kk_query_pool *pool);
+
+void kk_device_init_timestamps(struct kk_device *dev);
+void kk_device_finish_timestamps(struct kk_device *dev);
+void kk_timestamp_entries_release(struct kk_device *dev,
+                                  struct util_dynarray *entries);
 
 #endif /* KK_QUERY_POOL_H */

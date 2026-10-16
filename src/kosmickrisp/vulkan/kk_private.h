@@ -37,6 +37,10 @@
 #define KK_MAX_MULTIVIEW_VIEW_COUNT    32
 #define KK_TEXTURE_BUFFER_WIDTH        (1u << 14)
 #define KK_MAX_OCCLUSION_QUERIES       (32768)
+/* Metal counter heaps hold at most 4096 entries, and a process gets at most
+ * 32 of them, whatever their size. */
+#define KK_TS_HEAP_ENTRIES             4096
+#define KK_TS_MAX_HEAPS                32
 #define KK_MIN_SAMPLE_LOCATION         (0.0f)
 #define KK_MAX_SAMPLE_LOCATION         (0.9375f)
 
