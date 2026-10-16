@@ -254,6 +254,22 @@ kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+void
+kk_device_lock_atomic64(struct kk_device *dev, uint32_t classes)
+{
+   if ((p_atomic_read(&dev->atomic64.locked) & classes) == classes)
+      return;
+
+   simple_mtx_lock(&dev->atomic64.lock);
+   if (dev->has_queue)
+      kk_queue_wait_for_idle(&dev->queue);
+   uint32_t *flags = dev->atomic64.bo->cpu;
+   u_foreach_bit(c, classes)
+      p_atomic_set(&flags[c], 1u);
+   p_atomic_set(&dev->atomic64.locked, dev->atomic64.locked | classes);
+   simple_mtx_unlock(&dev->atomic64.lock);
+}
+
 static void
 kk_device_finish_sparse_residency(struct kk_device *dev)
 {
@@ -365,9 +381,16 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       simple_mtx_init(&dev->sparse_residency.lock, mtx_plain);
    }
 
-   result = kk_device_init_lib(dev);
+   result = kk_alloc_bo(dev, &dev->vk.base, KK_ATOMIC64_ARENA_SIZE, 8u,
+                        &dev->atomic64.bo);
    if (result != VK_SUCCESS)
       goto fail_sparse_residency;
+   memset(dev->atomic64.bo->cpu, 0, KK_ATOMIC64_ARENA_SIZE);
+   simple_mtx_init(&dev->atomic64.lock, mtx_plain);
+
+   result = kk_device_init_lib(dev);
+   if (result != VK_SUCCESS)
+      goto fail_atomic64;
 
    if (pdev->settings.gpu_capture_immediately) {
       mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
@@ -378,6 +401,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_atomic64:
+   simple_mtx_destroy(&dev->atomic64.lock);
+   kk_destroy_bo(dev, dev->atomic64.bo);
 fail_sparse_residency:
    kk_device_finish_sparse_residency(dev);
 fail_sampler_heap:
@@ -418,6 +444,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       mtl_stop_gpu_capture();
    }
 
+   if (dev->has_queue)
+      kk_queue_wait_for_idle(&dev->queue);
+
    /* Meta first since it may destroy Vulkan objects */
    kk_device_finish_meta(dev);
    kk_device_finish_lib(dev);
@@ -428,6 +457,8 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->heap)
       kk_destroy_bo(dev, dev->heap);
 
+   simple_mtx_destroy(&dev->atomic64.lock);
+   kk_destroy_bo(dev, dev->atomic64.bo);
    kk_device_finish_sparse_residency(dev);
 
    if (dev->has_queue) {

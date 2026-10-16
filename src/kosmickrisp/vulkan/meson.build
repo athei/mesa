@@ -90,6 +90,7 @@ kk_files = files(
   'kk_image.c',
   'kk_instance.h',
   'kk_instance.c',
+  'kk_nir_lower_atomic64.c',
   'kk_nir_lower_compute_derivatives.c',
   'kk_nir_lower_custom_border.c',
   'kk_nir_lower_denorm.c',

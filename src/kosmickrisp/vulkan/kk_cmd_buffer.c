@@ -862,6 +862,7 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
    root->addr = root_ptr.gpu;
    root->sparse_residency =
       dev->sparse_residency.bo ? dev->sparse_residency.bo->gpu : 0u;
+   root->atomic64 = dev->atomic64.bo->gpu;
 
    memcpy(root_ptr.cpu, root, sizeof(*root));
    desc->root_dirty = false;

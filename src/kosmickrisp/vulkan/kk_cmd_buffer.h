@@ -62,6 +62,7 @@ struct kk_root_descriptor_table {
    uint8_t set_dynamic_buffer_start[KK_MAX_SETS];
 
    uint64_t sparse_residency;
+   uint64_t atomic64;
    uint32_t zero;
 };
 

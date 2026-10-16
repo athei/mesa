@@ -200,6 +200,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_robustness2 = true,
       .EXT_sample_locations = true,
       .EXT_shader_atomic_float = true,
+      .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_replicated_composites = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
@@ -308,6 +309,8 @@ kk_get_device_features(
       .shaderFloat16 = true,
       .shaderInputAttachmentArrayDynamicIndexing = true,
       .shaderInputAttachmentArrayNonUniformIndexing = true,
+      .shaderBufferInt64Atomics = true,
+      .shaderSharedInt64Atomics = true,
       .shaderInt8 = true,
       .shaderOutputLayer = true,
       .shaderOutputViewportIndex = true,
@@ -519,6 +522,10 @@ kk_get_device_features(
 
       /* VK_EXT_provoking_vertex */
       .provokingVertexLast = true,
+
+      /* VK_EXT_shader_image_atomic_int64 */
+      .shaderImageInt64Atomics = true,
+      .sparseImageInt64Atomics = false,
 
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,

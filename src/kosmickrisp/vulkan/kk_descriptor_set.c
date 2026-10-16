@@ -13,6 +13,7 @@
 #include "kk_descriptor_set_layout.h"
 #include "kk_device.h"
 #include "kk_entrypoints.h"
+#include "kk_image.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
 #include "kk_sampler.h"
@@ -174,6 +175,11 @@ get_storage_image_view_desc(
       desc.image_gpu_resource_id = view->planes[plane].storage_gpu_resource_id;
       desc.residency_gpu_resource_id =
          view->planes[plane].storage_residency_gpu_resource_id;
+
+      const struct kk_image *image =
+         container_of(view->vk.image, struct kk_image, vk);
+      desc.buffer_size_el = !!(image->planes[plane].layout.usage &
+                               MTL_TEXTURE_USAGE_SHADER_ATOMIC);
    }
 
    assert(sizeof(desc) <= dst_size);

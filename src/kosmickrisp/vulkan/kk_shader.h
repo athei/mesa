@@ -51,6 +51,7 @@ struct kk_shader_info {
    mesa_shader_stage stage;
    bool uses_per_draw_data;
    bool has_fs_stats;
+   uint8_t atomic64_locked;
 
    /* Required for fragment shader cull distance discards. */
    uint8_t num_cull_distances;
@@ -213,6 +214,16 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 bool kk_nir_lower_custom_border(nir_shader *nir);
 bool kk_nir_lower_compute_derivatives(nir_shader *nir);
 bool kk_nir_lower_compute_lod_queries(nir_shader *nir);
+#define KK_ATOMIC64_BUFFER      0
+#define KK_ATOMIC64_IMAGE       1
+#define KK_ATOMIC64_TIMEOUT     2
+#define KK_ATOMIC64_LOCK_COUNT  4096u
+#define KK_ATOMIC64_LOCK_OFFSET 64u
+#define KK_ATOMIC64_SPIN_LIMIT  (1u << 25)
+#define KK_ATOMIC64_ARENA_SIZE  \
+   (KK_ATOMIC64_LOCK_OFFSET + 4u * KK_ATOMIC64_LOCK_COUNT)
+
+bool kk_nir_lower_atomic64(nir_shader *nir, uint8_t *locked);
 bool kk_nir_lower_denorm_preserve(nir_shader *nir);
 bool kk_nir_lower_denorm_preserve_ldexp(nir_shader *nir);
 bool kk_nir_lower_denorm_flush(nir_shader *nir);

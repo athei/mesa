@@ -26,13 +26,21 @@ struct kk_commit_data {
    struct kk_cmd_buffer *cmd;
 };
 
-static void
-kk_queue_wait_for_commits(struct kk_queue *queue)
+void
+kk_queue_wait_for_idle(struct kk_queue *queue)
 {
    mtx_lock(&queue->mutex);
-   while (queue->commits_in_flight > 0u)
+   while (queue->work_in_flight > 0u)
       cnd_wait(&queue->cond, &queue->mutex);
    mtx_unlock(&queue->mutex);
+}
+
+static void
+kk_queue_work_done_locked(struct kk_queue *queue)
+{
+   assert(queue->work_in_flight > 0u);
+   if (--queue->work_in_flight == 0u)
+      cnd_broadcast(&queue->cond);
 }
 
 static void
@@ -50,13 +58,25 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
       vk_device_set_lost(
          &dev->vk, "Command queue error: %s, with message \"%s\"",
          mtl_command_queue_error_to_string(data->error), data->error_message);
+      memset((uint8_t *)dev->atomic64.bo->cpu + KK_ATOMIC64_LOCK_OFFSET, 0,
+             KK_ATOMIC64_ARENA_SIZE - KK_ATOMIC64_LOCK_OFFSET);
    }
+
+   const uint32_t *atomic64 = dev->atomic64.bo->cpu;
+   if (p_atomic_read(&atomic64[KK_ATOMIC64_TIMEOUT]))
+      vk_device_set_lost(&dev->vk,
+                         "A 64-bit atomic timed out waiting for its lock");
 }
 
 static void
 commit_callback(struct mtl_feedback_data *data)
 {
-   check_device_lost((struct kk_device *)data->user_data, data);
+   struct kk_device *dev = (struct kk_device *)data->user_data;
+   check_device_lost(dev, data);
+
+   mtx_lock(&dev->queue.mutex);
+   kk_queue_work_done_locked(&dev->queue);
+   mtx_unlock(&dev->queue.mutex);
 }
 
 static void
@@ -73,6 +93,7 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
    mtx_lock(&queue->mutex);
 
    kk_queue_release_cmd_buffer_locked(queue, commit->cmd);
+   vk_free(&dev->vk.alloc, commit);
 
    assert(queue->commits_in_flight > 0u);
    if (--queue->commits_in_flight == 0u) {
@@ -80,10 +101,9 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
                           kk_cmd_pool_to_handle(queue->cmd_pool), 0u);
       cnd_broadcast(&queue->cond);
    }
+   kk_queue_work_done_locked(queue);
 
    mtx_unlock(&queue->mutex);
-
-   vk_free(&dev->vk.alloc, commit);
 }
 
 static bool
@@ -163,6 +183,7 @@ rerecord_and_commit_cmd_buffer(struct kk_queue *queue,
    kk_device_make_resources_resident(dev);
 
    queue->commits_in_flight++;
+   queue->work_in_flight++;
    kk_queue_commit(queue, rerecord, rerecord_commit_callback, commit);
 
    mtx_unlock(&queue->mutex);
@@ -427,6 +448,9 @@ kk_queue_bind_sparse(struct kk_queue *queue, struct vk_queue_submit *submit,
    }
 }
 
+static VkResult kk_queue_submit_locked(struct kk_queue *queue,
+                                       struct vk_queue_submit *submit);
+
 static VkResult
 kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -435,6 +459,17 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    if (vk_queue_is_lost(&queue->vk))
       return VK_ERROR_DEVICE_LOST;
+
+   simple_mtx_lock(&dev->atomic64.lock);
+   VkResult result = kk_queue_submit_locked(queue, submit);
+   simple_mtx_unlock(&dev->atomic64.lock);
+   return result;
+}
+
+static VkResult
+kk_queue_submit_locked(struct kk_queue *queue, struct vk_queue_submit *submit)
+{
+   struct kk_device *dev = kk_queue_device(queue);
 
    for (struct vk_sync_wait *wait = submit->waits,
                             *end = submit->waits + submit->wait_count;
@@ -476,6 +511,9 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          if (result != VK_SUCCESS)
             return result;
       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
+         mtx_lock(&queue->mutex);
+         queue->work_in_flight++;
+         mtx_unlock(&queue->mutex);
          kk_queue_commit(queue, cmd_buffer, commit_callback, dev);
       }
 
@@ -549,6 +587,7 @@ kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
 
    queue->free_cmd_buffers = UTIL_DYNARRAY_INIT;
    queue->commits_in_flight = 0u;
+   queue->work_in_flight = 0u;
    mtx_init(&queue->mutex, mtx_plain);
    cnd_init(&queue->cond);
 
@@ -565,7 +604,7 @@ void
 kk_queue_finish(struct kk_device *dev, struct kk_queue *queue)
 {
    /* There may be in-flight command buffers, wait for them to finish. */
-   kk_queue_wait_for_commits(queue);
+   kk_queue_wait_for_idle(queue);
 
    mtl_command_queue_remove_residency_set(queue->mtl_handle,
                                           dev->residency_set.handle);

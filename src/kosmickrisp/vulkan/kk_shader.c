@@ -1090,9 +1090,10 @@ kk_nir_count_fs_invocations(nir_shader *nir)
 static void
 kk_compile_msl(struct kk_physical_device *pdev, nir_shader *nir,
                const struct vk_graphics_pipeline_state *state,
-               struct msl_compile_data *data)
+               struct msl_compile_data *data, uint8_t *atomic64_locked)
 {
    NIR_PASS(_, nir, kk_nir_lower_poly);
+   NIR_PASS(_, nir, kk_nir_lower_atomic64, atomic64_locked);
 
    if (nir->info.float_controls_execution_mode &
        FLOAT_CONTROLS_DENORM_PRESERVE_FP32) {
@@ -1261,20 +1262,23 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
          count->info.stage = MESA_SHADER_COMPUTE;
          memset(&count->info.cs, 0, sizeof(count->info.cs));
          count->xfb_info = NULL;
-         kk_compile_msl(pdev, count, state, &shader->gs_count);
+         kk_compile_msl(pdev, count, state, &shader->gs_count,
+                        &shader->info.atomic64_locked);
       } else {
          ralloc_free(count);
       }
 
       if (shader->info.gs.xfb)
-         kk_compile_msl(pdev, pre_gs, state, &shader->gs_pre);
+         kk_compile_msl(pdev, pre_gs, state, &shader->gs_pre,
+                        &shader->info.atomic64_locked);
       else
          ralloc_free(pre_gs);
 
       nir->info.stage = MESA_SHADER_COMPUTE;
       memset(&nir->info.cs, 0, sizeof(nir->info.cs));
       nir->xfb_info = NULL;
-      kk_compile_msl(pdev, nir, state, &shader->gs_main);
+      kk_compile_msl(pdev, nir, state, &shader->gs_main,
+                     &shader->info.atomic64_locked);
 
       /* From here on, nir is the rasterization VS of the GS */
       nir = rast;
@@ -1294,11 +1298,15 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
    if (stage == MESA_SHADER_FRAGMENT) {
       nir_shader *counted = nir_shader_clone(NULL, nir);
       kk_nir_count_fs_invocations(counted);
-      kk_compile_msl(pdev, counted, state, &shader->fs_stats);
+      kk_compile_msl(pdev, counted, state, &shader->fs_stats,
+                     &shader->info.atomic64_locked);
       shader->info.has_fs_stats = true;
    }
 
-   kk_compile_msl(pdev, nir, state, &shader->msl_data[stage]);
+   kk_compile_msl(pdev, nir, state, &shader->msl_data[stage],
+                  &shader->info.atomic64_locked);
+
+   kk_device_lock_atomic64(dev, shader->info.atomic64_locked);
 
    *shader_out = shader;
 
@@ -2239,6 +2247,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       goto fail;
 
    shader->info = info;
+   kk_device_lock_atomic64(dev, shader->info.atomic64_locked);
 
    if (shader->info.stage == MESA_SHADER_VERTEX) {
       u_foreach_bit(stage, shader->info.vs.additional_stages_bits) {
