@@ -13,6 +13,12 @@
 #include <Metal/MTL4RenderPipeline.h>
 #include <Metal/MTLDevice.h>
 
+#include <limits.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
 /* Compiler */
 mtl_compiler *
 mtl_new_compiler(mtl_device *device)
@@ -58,6 +64,19 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
 
       if (lib == nil) {
          fprintf(stderr, "Failed to create MTLLibrary: %s\n", [error.localizedDescription UTF8String]);
+
+         const char *dir = getenv("MESA_KK_FAILED_MSL_DIR");
+         if (dir) {
+            static _Atomic uint32_t count;
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "%s/%d-%u.metal", dir, getpid(), count++);
+            FILE *f = fopen(path, "w");
+            if (f) {
+               fputs(src, f);
+               fclose(f);
+               fprintf(stderr, "MSL written to %s\n", path);
+            }
+         }
       }
 
       return lib;
@@ -160,6 +179,50 @@ mtl_render_pipeline_descriptor_set_raster_sample_count(mtl_render_pipeline_descr
    @autoreleasepool {
       MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
       desc.rasterSampleCount = sample_count;
+   }
+}
+
+void
+mtl_render_pipeline_descriptor_set_alpha_to_coverage(mtl_render_pipeline_descriptor *descriptor,
+                                                     bool enabled)
+{
+   @autoreleasepool {
+      MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+      desc.alphaToCoverageState = enabled ? MTL4AlphaToCoverageStateEnabled
+                                          : MTL4AlphaToCoverageStateDisabled;
+   }
+}
+
+void
+mtl_render_pipeline_descriptor_set_alpha_to_one(mtl_render_pipeline_descriptor *descriptor,
+                                                bool enabled)
+{
+   @autoreleasepool {
+      MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+      desc.alphaToOneState = enabled ? MTL4AlphaToOneStateEnabled
+                                     : MTL4AlphaToOneStateDisabled;
+   }
+}
+
+void
+mtl_render_pipeline_descriptor_set_color_attachment_blend(mtl_render_pipeline_descriptor *descriptor,
+                                                          uint8_t index,
+                                                          const struct mtl_color_attachment_blend *blend)
+{
+   @autoreleasepool {
+      MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+      MTL4RenderPipelineColorAttachmentDescriptor *att = desc.colorAttachments[index];
+      att.writeMask = (MTLColorWriteMask)blend->write_mask;
+      att.blendingState = blend->blend_enable ? MTL4BlendStateEnabled
+                                              : MTL4BlendStateDisabled;
+      if (blend->blend_enable) {
+         att.sourceRGBBlendFactor = (MTLBlendFactor)blend->src_rgb;
+         att.destinationRGBBlendFactor = (MTLBlendFactor)blend->dst_rgb;
+         att.rgbBlendOperation = (MTLBlendOperation)blend->rgb_op;
+         att.sourceAlphaBlendFactor = (MTLBlendFactor)blend->src_alpha;
+         att.destinationAlphaBlendFactor = (MTLBlendFactor)blend->dst_alpha;
+         att.alphaBlendOperation = (MTLBlendOperation)blend->alpha_op;
+      }
    }
 }
 

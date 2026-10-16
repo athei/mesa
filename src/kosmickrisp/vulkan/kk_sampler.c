@@ -250,9 +250,8 @@ kk_CreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
 
    /* When LOD bias is natively supported, pass 0 for any pre-compiled shaders
     * that still lower it */
-   sampler->lod_bias_fp16 = pdev->info.gpu_apple_family < 10
-                               ? _mesa_float_to_half(pCreateInfo->mipLodBias)
-                               : 0;
+   sampler->lod_bias =
+      pdev->info.gpu_apple_family < 10 ? pCreateInfo->mipLodBias : 0.0f;
 
    sampler->minmax_flags =
       (pCreateInfo->minFilter == VK_FILTER_LINEAR

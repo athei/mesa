@@ -64,54 +64,22 @@ fs_force_output_type(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    enum pipe_format format =
       render_target_formats[io.location - FRAG_RESULT_DATA0];
    nir_alu_type type = nir_intrinsic_src_type(intrin);
-   if (util_format_is_float(format) || util_format_is_unorm(format)) {
-      if (type & nir_type_uint) {
-         b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *value =
-            nir_u2fN(b, intrin->src[0].ssa, nir_src_bit_size(intrin->src[0]));
-         nir_src_rewrite(&intrin->src[0], value);
-         type ^= (nir_type_float | nir_type_uint);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      } else if (type & nir_type_int) {
-         b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *value =
-            nir_u2fN(b, intrin->src[0].ssa, nir_src_bit_size(intrin->src[0]));
-         nir_src_rewrite(&intrin->src[0], value);
-         type ^= (nir_type_float | nir_type_int);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      }
-   } else if (util_format_is_pure_sint(format)) {
-      if (type & nir_type_uint) {
-         type ^= (nir_type_uint | nir_type_int);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      } else if (type & nir_type_float) {
-         b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *value =
-            nir_f2uN(b, intrin->src[0].ssa, nir_src_bit_size(intrin->src[0]));
-         nir_src_rewrite(&intrin->src[0], value);
-         type ^= (nir_type_float | nir_type_int);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      }
-   } else if (util_format_is_pure_uint(format)) {
-      if (type & nir_type_int) {
-         type ^= (nir_type_int | nir_type_uint);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      } else if (type & nir_type_float) {
-         b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *value =
-            nir_f2uN(b, intrin->src[0].ssa, nir_src_bit_size(intrin->src[0]));
-         nir_src_rewrite(&intrin->src[0], value);
-         type ^= (nir_type_float | nir_type_uint);
-         nir_intrinsic_set_src_type(intrin, type);
-         return true;
-      }
-   }
-   return false;
+   nir_alu_type base;
+   if (util_format_is_float(format) || util_format_is_unorm(format) ||
+       util_format_is_snorm(format))
+      base = nir_type_float;
+   else if (util_format_is_pure_sint(format))
+      base = nir_type_int;
+   else if (util_format_is_pure_uint(format))
+      base = nir_type_uint;
+   else
+      return false;
+
+   if (nir_alu_type_get_base_type(type) == base)
+      return false;
+
+   nir_intrinsic_set_src_type(intrin, base | nir_alu_type_get_type_size(type));
+   return true;
 }
 
 bool
@@ -226,6 +194,7 @@ msl_lower_textures(nir_shader *nir, bool lower_lod_bias)
    nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0u,
       .lower_sampler_lod_bias = lower_lod_bias,
+      .sampler_lod_bias_32bit = true,
 
       /* We don't use 1D textures because they are really limited in Metal */
       .lower_1d = true,
@@ -727,22 +696,44 @@ msl_nir_lower_cull_distance_fs(nir_shader *s, unsigned nr_distances)
 /* Scalarize stores to CLIP_DIST* varyings */
 static bool
 scalarize_clip_cull_distance_filter(const nir_intrinsic_instr *intrin,
-                                    UNUSED const void *_data)
+                                    const void *data)
 {
-   if (intrin->intrinsic != nir_intrinsic_store_output)
+   if (!nir_intrinsic_has_io_semantics(intrin))
       return false;
    nir_io_semantics semantics = nir_intrinsic_io_semantics(intrin);
-   return semantics.location == VARYING_SLOT_CLIP_DIST0 ||
-          semantics.location == VARYING_SLOT_CLIP_DIST1 ||
-          semantics.location == VARYING_SLOT_CULL_DIST0 ||
-          semantics.location == VARYING_SLOT_CULL_DIST1;
+   if (semantics.location == VARYING_SLOT_CLIP_DIST0 ||
+       semantics.location == VARYING_SLOT_CLIP_DIST1 ||
+       semantics.location == VARYING_SLOT_CULL_DIST0 ||
+       semantics.location == VARYING_SLOT_CULL_DIST1)
+      return true;
+
+   if (semantics.location < VARYING_SLOT_VAR0 ||
+       semantics.location > VARYING_SLOT_VAR31)
+      return false;
+
+   const nir_shader *nir = data;
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_store_output:
+      return (nir->info.stage == MESA_SHADER_VERTEX ||
+              nir->info.stage == MESA_SHADER_TESS_EVAL) &&
+             nir->info.next_stage != MESA_SHADER_TESS_CTRL &&
+             nir->info.next_stage != MESA_SHADER_GEOMETRY;
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input:
+      return nir->info.stage == MESA_SHADER_FRAGMENT;
+   default:
+      return false;
+   }
 }
 
 void
 msl_nir_lower_clip_cull_distance(nir_shader *nir, unsigned num_cull_distances)
 {
-   NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out,
-            scalarize_clip_cull_distance_filter, NULL);
+   nir_variable_mode modes = nir_var_shader_out;
+   if (nir->info.stage != MESA_SHADER_VERTEX)
+      modes |= nir_var_shader_in;
+   NIR_PASS(_, nir, nir_lower_io_to_scalar, modes,
+            scalarize_clip_cull_distance_filter, nir);
    NIR_PASS(_, nir, nir_separate_merged_clip_cull_io);
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, msl_nir_lower_cull_distance_fs, num_cull_distances);

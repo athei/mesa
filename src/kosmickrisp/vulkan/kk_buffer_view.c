@@ -20,6 +20,14 @@
 
 #include "vk_format.h"
 
+static bool
+kk_is_rgb32_format(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R32G32B32_FLOAT ||
+          format == PIPE_FORMAT_R32G32B32_UINT ||
+          format == PIPE_FORMAT_R32G32B32_SINT;
+}
+
 VkFormatFeatureFlags2
 kk_get_buffer_format_features(struct kk_physical_device *pdev,
                               VkFormat vk_format)
@@ -46,6 +54,9 @@ kk_get_buffer_format_features(struct kk_physical_device *pdev,
          features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
    }
 
+   if (kk_is_rgb32_format(p_format))
+      features |= VK_FORMAT_FEATURE_2_UNIFORM_TEXEL_BUFFER_BIT;
+
    if (kk_vbo_supports_format(p_format))
       features |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
 
@@ -64,6 +75,15 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    enum pipe_format p_format = vk_format_to_pipe_format(view->vk.format);
+   struct kk_buffer *buffer =
+      container_of(view->vk.buffer, struct kk_buffer, vk);
+   uint32_t el_size_B = util_format_get_blocksize(p_format);
+
+   if (kk_is_rgb32_format(p_format)) {
+      view->rgb32_addr = vk_buffer_address(&buffer->vk, view->vk.offset);
+      goto residency;
+   }
+
    const struct kk_va_format *supported_format = kk_get_va_format(p_format);
 
    /* If we reached here, we support reading at least */
@@ -76,7 +96,6 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
        view->vk.format == VK_FORMAT_R32_SINT)
       usage |= MTL_TEXTURE_USAGE_SHADER_ATOMIC;
 
-   uint32_t el_size_B = util_format_get_blocksize(p_format);
    uint64_t aligned_offset_B =
       view->vk.offset & ~(uint64_t)(KK_MIN_TEXEL_BUFFER_ALIGNMENT - 1);
    uint32_t lead_B = view->vk.offset - aligned_offset_B;
@@ -104,8 +123,6 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
          },
       .linear_stride_B = view->vk.range + lead_B,
    };
-   struct kk_buffer *buffer =
-      container_of(view->vk.buffer, struct kk_buffer, vk);
    view->mtl_texel_buffer_handle = mtl_new_texture_with_descriptor_linear(
       buffer->metal.handle, &layout,
       kk_buffer_mtl_offset(buffer, aligned_offset_B));
@@ -116,6 +133,7 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    view->texel_buffer_gpu_id =
       mtl_texture_get_gpu_resource_id(view->mtl_texel_buffer_handle);
 
+residency:
    if (buffer->residency.pages) {
       simple_mtx_lock(&dev->sparse_residency.lock);
       uint32_t id = util_idalloc_alloc(&dev->sparse_residency.views);

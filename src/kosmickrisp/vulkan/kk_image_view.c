@@ -263,11 +263,29 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
          /* Handle mutable formats */
          if (view->vk.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
-            view->planes[view_plane].render_is_view = requires_format_change;
-            if (requires_format_change) {
+            bool render_3d = image->vk.image_type == VK_IMAGE_TYPE_3D &&
+                             view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D;
+            view->planes[view_plane].render_depth_plane = render_3d;
+
+            bool render_format_change =
+               requires_format_change &&
+               !util_format_is_depth_or_stencil(plane->layout.format.pipe);
+            view->planes[view_plane].render_is_view = render_format_change;
+            if (render_format_change && render_3d) {
+               struct kk_view_layout layout_3d = view_layout;
+               layout_3d.view_type = VK_IMAGE_VIEW_TYPE_3D;
+               layout_3d.base_array_layer = 0u;
+               layout_3d.array_len = 1u;
+               view->planes[view_plane].mtl_handle_render =
+                  mtl_new_texture_view_with_no_swizzle(
+                     image->planes[image_plane].mtl_handle, &layout_3d);
+            } else if (render_format_change) {
                view->planes[view_plane].mtl_handle_render =
                   mtl_new_texture_view_with_no_swizzle(mtl_handle,
                                                        &view_layout);
+            } else if (render_3d) {
+               view->planes[view_plane].mtl_handle_render =
+                  mtl_retain(image->planes[image_plane].mtl_handle);
             } else /* Subresource indices will be set in attachment descriptor */
                view->planes[view_plane].mtl_handle_render =
                   mtl_retain(mtl_handle);

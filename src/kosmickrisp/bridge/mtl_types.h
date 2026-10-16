@@ -10,7 +10,9 @@
 #ifndef KK_MTL_TYPES_H
 #define KK_MTL_TYPES_H 1
 
+#include <stdbool.h>
 #include <stddef.h> /* For size_t definition */
+#include <stdint.h>
 
 /** HANDLES */
 typedef void mtl_device;
@@ -222,6 +224,54 @@ enum mtl_compare_function {
    MTL_COMPARE_FUNCTION_NOT_EQUAL = 5,
    MTL_COMPARE_FUNCTION_GREATER_EQUAL = 6,
    MTL_COMPARE_FUNCTION_ALWAYS = 7,
+};
+
+enum mtl_blend_factor {
+   MTL_BLEND_FACTOR_ZERO = 0,
+   MTL_BLEND_FACTOR_ONE = 1,
+   MTL_BLEND_FACTOR_SOURCE_COLOR = 2,
+   MTL_BLEND_FACTOR_ONE_MINUS_SOURCE_COLOR = 3,
+   MTL_BLEND_FACTOR_SOURCE_ALPHA = 4,
+   MTL_BLEND_FACTOR_ONE_MINUS_SOURCE_ALPHA = 5,
+   MTL_BLEND_FACTOR_DESTINATION_COLOR = 6,
+   MTL_BLEND_FACTOR_ONE_MINUS_DESTINATION_COLOR = 7,
+   MTL_BLEND_FACTOR_DESTINATION_ALPHA = 8,
+   MTL_BLEND_FACTOR_ONE_MINUS_DESTINATION_ALPHA = 9,
+   MTL_BLEND_FACTOR_SOURCE_ALPHA_SATURATED = 10,
+   MTL_BLEND_FACTOR_BLEND_COLOR = 11,
+   MTL_BLEND_FACTOR_ONE_MINUS_BLEND_COLOR = 12,
+   MTL_BLEND_FACTOR_BLEND_ALPHA = 13,
+   MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA = 14,
+};
+
+enum mtl_blend_operation {
+   MTL_BLEND_OPERATION_ADD = 0,
+   MTL_BLEND_OPERATION_SUBTRACT = 1,
+   MTL_BLEND_OPERATION_REVERSE_SUBTRACT = 2,
+   MTL_BLEND_OPERATION_MIN = 3,
+   MTL_BLEND_OPERATION_MAX = 4,
+};
+
+enum mtl_color_write_mask {
+   MTL_COLOR_WRITE_MASK_NONE = 0,
+   MTL_COLOR_WRITE_MASK_RED = 1 << 3,
+   MTL_COLOR_WRITE_MASK_GREEN = 1 << 2,
+   MTL_COLOR_WRITE_MASK_BLUE = 1 << 1,
+   MTL_COLOR_WRITE_MASK_ALPHA = 1 << 0,
+   MTL_COLOR_WRITE_MASK_ALL = 0xf,
+};
+
+/* Blending of one color attachment, as MTLRenderPipelineColorAttachment
+ * describes it */
+struct mtl_color_attachment_blend {
+   bool blend_enable;
+   uint8_t write_mask; /* enum mtl_color_write_mask */
+   uint8_t src_rgb;    /* enum mtl_blend_factor */
+   uint8_t dst_rgb;
+   uint8_t rgb_op; /* enum mtl_blend_operation */
+   uint8_t src_alpha;
+   uint8_t dst_alpha;
+   uint8_t alpha_op;
 };
 
 enum mtl_winding {

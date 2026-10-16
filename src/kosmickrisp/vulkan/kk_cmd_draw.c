@@ -131,12 +131,18 @@ kk_fill_common_attachment_description(
       descriptor, iview->planes[0].mtl_handle_render);
    /* If a view is being used e.g. for format change, it already points to the
     * required slice and level */
+   bool depth_plane = iview->planes[0].render_depth_plane;
    if (!iview->planes[0].render_is_view) {
       mtl_render_pass_attachment_descriptor_set_level(descriptor,
                                                       iview->vk.base_mip_level);
       mtl_render_pass_attachment_descriptor_set_slice(
-         descriptor, iview->vk.base_array_layer);
+         descriptor, depth_plane ? 0u : iview->vk.base_array_layer);
+   } else {
+      mtl_render_pass_attachment_descriptor_set_level(descriptor, 0u);
+      mtl_render_pass_attachment_descriptor_set_slice(descriptor, 0u);
    }
+   mtl_render_pass_attachment_descriptor_set_depth_plane(
+      descriptor, depth_plane ? iview->vk.base_array_layer : 0u);
 
    /* STORE_OP_NONE behaves like DONT_CARE if there are writes
     * (CLEAR or DONT_CARE are writes).
@@ -394,10 +400,17 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
        * which will trigger a Metal validation error. Ensure we only use this
        * value if the attachment is actually cleared. */
       if (pRenderingInfo->pDepthAttachment->loadOp ==
-          VK_ATTACHMENT_LOAD_OP_CLEAR)
+          VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         double depth =
+            pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
+         if (vk_format_to_pipe_format(iview->vk.format) ==
+             PIPE_FORMAT_Z16_UNORM) {
+            depth = rint(CLAMP(depth, 0.0, 1.0) * 65535.0);
+            depth = MIN2((depth + 0.25) / 65535.0, 1.0);
+         }
          mtl_render_pass_attachment_descriptor_set_clear_depth(
-            attachment_descriptor,
-            pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth);
+            attachment_descriptor, depth);
+      }
 
       if (renderpass_resolve)
          mtl_render_pass_attachment_descriptor_set_depth_resolve_filter(
@@ -1593,6 +1606,10 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
       memcpy(desc->root.draw.blend_constant, dyn->cb.blend_constants,
              sizeof(dyn->cb.blend_constants));
       desc->root_dirty = true;
+
+      /* For the attachment the render pipeline blends with alpha to
+       * coverage */
+      mtl_set_blend_color(enc, dyn->cb.blend_constants);
    }
 
    if (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
