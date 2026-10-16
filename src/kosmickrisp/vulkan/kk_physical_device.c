@@ -179,6 +179,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_debug_marker = true,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
+      .EXT_device_generated_commands = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_metal = true,
       .EXT_external_memory_host = true,
@@ -458,6 +459,11 @@ kk_get_device_features(
 
       /* VK_EXT_depth_clip_enable */
       .depthClipEnable = true,
+
+      /* VK_EXT_device_generated_commands */
+      .deviceGeneratedCommands =
+         supported_extensions->EXT_device_generated_commands,
+      .dynamicGeneratedPipelineLayout = false,
 
       /* VK_EXT_extended_dynamic_state3 */
       .extendedDynamicState3DepthClampEnable = true,
@@ -784,6 +790,25 @@ kk_get_device_properties(
 
       /* VK_EXT_custom_border_color */
       .maxCustomBorderColorSamplers = max_samplers,
+
+      /* VK_EXT_device_generated_commands */
+      .maxIndirectPipelineCount = 4096,
+      .maxIndirectShaderObjectCount = 4096,
+      .maxIndirectSequenceCount = 1 << 20,
+      .maxIndirectCommandsTokenCount = 16,
+      .maxIndirectCommandsTokenOffset = 2047,
+      .maxIndirectCommandsIndirectStride = 2048,
+      .supportedIndirectCommandsInputModes =
+         VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT |
+         VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT,
+      .supportedIndirectCommandsShaderStages =
+         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+         VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+      .supportedIndirectCommandsShaderStagesPipelineBinding = 0,
+      .supportedIndirectCommandsShaderStagesShaderBinding = 0,
+      .deviceGeneratedCommandsTransformFeedback = false,
+      .deviceGeneratedCommandsMultiDrawIndirectCount = false,
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,

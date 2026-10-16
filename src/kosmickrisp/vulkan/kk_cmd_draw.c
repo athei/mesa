@@ -11,6 +11,7 @@
 
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
+#include "kk_cmd_dgc.h"
 #include "kk_format.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
@@ -1106,7 +1107,8 @@ struct kk_draw_command {
    bool indexed;
    bool restart;
    bool flatshade_first;
-   uint8_t pad_[3];
+   bool unrolled;
+   uint8_t pad_[2];
    uint32_t predicate_count;
    enum kk_predicate_op predicate_op[2];
    uint32_t draw_count;
@@ -1969,6 +1971,9 @@ requires_unroll_flatshade(struct kk_cmd_buffer *cmd,
 static bool
 requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 {
+   if (data->unrolled)
+      return false;
+
    /* No need to unroll for tessellation. Robustness is handled by tessellator,
     * restart is not supported for patch lists, and flat-shading does not have a
     * well-defined vertex used when tessellating. A GS reads any index size and
@@ -2339,18 +2344,15 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
    return draw;
 }
 
+struct kk_draw_roots {
+   uint64_t base;
+   uint32_t stride_B;
+};
+
 static void
-kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
+                const struct kk_draw_roots *roots)
 {
-   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-
-   kk_flush_gfx_state(cmd);
-
-   data->restart = dyn->ia.primitive_restart_enable;
-   data->restart_index = dyn->ia.primitive_restart_index;
-   data->flatshade_first =
-      dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
-
    /* Convert to indirect and process predicates. Skip draw if we fail. */
    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))
       return;
@@ -2374,10 +2376,14 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 
    for (uint32_t i = 0; i < data->draw_count; i++) {
       struct kk_draw_data draw_data = build_draw_data(cmd, data, i);
+      uint64_t root = roots && roots->base ? roots->base + i * roots->stride_B : 0;
+
+      if (root)
+         kk_cmd_bind_root_to_argument_table(cmd, root);
 
       if (data->upload_mask)
-         kk_upload_per_draw_data(cmd, data->upload_mask, i, &draw_data,
-                                 gs_restart);
+         kk_upload_per_draw_data(cmd, data->upload_mask, roots ? 0 : i,
+                                 &draw_data, gs_restart);
 
       if (tess)
          draw_data = kk_launch_tess(cmd, draw_data);
@@ -2386,11 +2392,33 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 
       /* TODO_KOSMICKRISP Remove this once unroll, tess and any compute does not
        * split render pass */
-      if (cmd->state.gfx.need_to_start_render_pass)
+      if (cmd->state.gfx.need_to_start_render_pass) {
          kk_flush_gfx_state(cmd);
+         if (root)
+            kk_cmd_bind_root_to_argument_table(cmd, root);
+      }
 
       kk_dispatch_draw(cmd, draw_data);
    }
+}
+
+static void
+kk_set_draw_state(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+
+   data->restart = dyn->ia.primitive_restart_enable;
+   data->restart_index = dyn->ia.primitive_restart_index;
+   data->flatshade_first =
+      dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+}
+
+static void
+kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   kk_flush_gfx_state(cmd);
+   kk_set_draw_state(cmd, data);
+   kk_draw_flushed(cmd, data, NULL);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2703,4 +2731,88 @@ kk_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer,
    };
 
    kk_draw(cmd, &data);
+}
+
+void
+kk_cmd_draw_generated(struct kk_cmd_buffer *cmd,
+                      const struct kk_indirect_commands_layout *layout,
+                      const VkGeneratedCommandsInfoEXT *info)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   struct kk_graphics_state *gfx = &cmd->state.gfx;
+   struct kk_descriptor_state *desc = &gfx->descriptors;
+   const struct vk_indirect_command_layout *vk = &layout->vk;
+
+   struct libkk_dgc_params params;
+   struct kk_dgc_buffers bufs;
+   if (!kk_dgc_prepare(cmd, layout, info, &params, &bufs))
+      return;
+
+   kk_flush_gfx_state(cmd);
+   params.template_root = desc->root.addr;
+
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   if (vs && (vk->dgc_info & BITFIELD_BIT(MESA_VK_DGC_VB))) {
+      uint32_t slot = 0;
+      u_foreach_bit(i, vs->info.vs.attribs_read) {
+         if (slot == LIBKK_DGC_MAX_ATTRIBS)
+            break;
+         if (dyn->vi->attributes_valid & BITFIELD_BIT(i)) {
+            struct vk_vertex_attribute_state attr = dyn->vi->attributes[i];
+            params.attribs[slot] = (struct libkk_dgc_attrib){
+               .binding = attr.binding,
+               .offset_B = attr.offset,
+               .size_B = util_format_get_blocksize(
+                  vk_format_to_pipe_format(attr.format)),
+               .valid = 1,
+            };
+         }
+         slot++;
+      }
+      params.attrib_count = slot;
+   }
+
+   kk_dgc_process(cmd, &params);
+
+   bool indexed = vk->dgc_info & BITFIELD_BIT(MESA_VK_DGC_DRAW_INDEXED);
+   struct kk_draw_command data = {
+      .prim = vk_topology_to_mesa(dyn->ia.primitive_topology),
+      .upload_mask = build_per_draw_upload_mask(cmd),
+      .index_buffer = indexed ? gfx->index.gpu : (struct kk_addr_range){0},
+      .index_buffer_el_size_B = indexed ? gfx->index.bytes_per_index : 0,
+      .indirect = true,
+      .indexed = indexed,
+      .draw_count = info->maxSequenceCount,
+      .indirect_command.addr = bufs.cmds,
+      .indirect_command.stride = bufs.cmd_stride_B,
+   };
+   kk_set_draw_state(cmd, &data);
+
+   if (params.has_ib && data.indexed) {
+      libkk_dgc_unroll(cmd, kk_grid_1d(1024 * info->maxSequenceCount), true,
+                       kk_heap(cmd), bufs.cmds, bufs.unrolled, bufs.ib_info,
+                       bufs.cmd_stride_B / 4, data.restart, data.flatshade_first,
+                       data.prim);
+
+      data.prim = u_decomposed_prim(data.prim);
+      data.index_buffer.addr = dev->heap->gpu + sizeof(struct poly_heap);
+      data.index_buffer.range = dev->heap->size_B - sizeof(struct poly_heap);
+      data.index_buffer_el_size_B = 4u;
+      data.restart_index = UINT32_MAX;
+      data.restart = false;
+      data.flatshade_first = true;
+      data.unrolled = true;
+      data.indirect_command.addr = bufs.unrolled;
+      data.indirect_command.stride = sizeof(VkDrawIndexedIndirectCommand);
+   }
+
+   struct kk_draw_roots roots = {
+      .base = bufs.roots,
+      .stride_B = bufs.root_stride_B,
+   };
+   kk_draw_flushed(cmd, &data, &roots);
+
+   if (desc->root.addr)
+      kk_cmd_bind_root_to_argument_table(cmd, desc->root.addr);
 }

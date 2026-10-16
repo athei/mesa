@@ -8,6 +8,7 @@
 
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
+#include "kk_cmd_dgc.h"
 #include "kk_descriptor_set_layout.h"
 #include "kk_device.h"
 #include "kk_entrypoints.h"
@@ -148,4 +149,42 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
       mtl_dispatch_threadgroups_with_indirect_buffer(
          encoder, pInfo->addressRange.address, local_size);
    }
+}
+
+void
+kk_cmd_dispatch_generated(struct kk_cmd_buffer *cmd,
+                          const struct kk_indirect_commands_layout *layout,
+                          const VkGeneratedCommandsInfoEXT *info)
+{
+   struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   struct libkk_dgc_params params;
+   struct kk_dgc_buffers bufs;
+
+   if (!kk_dgc_prepare(cmd, layout, info, &params, &bufs))
+      return;
+
+   for (uint32_t i = 0; i < 3; i++) {
+      desc->root_dirty |= desc->root.cs.base_group[i] != 0;
+      desc->root.cs.base_group[i] = 0;
+   }
+
+   kk_flush_compute_state(cmd);
+   params.template_root = desc->root.addr;
+   kk_dgc_process(cmd, &params);
+   kk_flush_compute_state(cmd);
+
+   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+   struct mtl_size local_size = cs->info.cs.local_size;
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
+
+   for (uint32_t i = 0; i < info->maxSequenceCount; i++) {
+      if (bufs.roots)
+         kk_cmd_bind_root_to_argument_table(
+            cmd, bufs.roots + (uint64_t)i * bufs.root_stride_B);
+      mtl_dispatch_threadgroups_with_indirect_buffer(
+         encoder, bufs.cmds + (uint64_t)i * bufs.cmd_stride_B, local_size);
+   }
+
+   if (desc->root.addr)
+      kk_cmd_bind_root_to_argument_table(cmd, desc->root.addr);
 }
