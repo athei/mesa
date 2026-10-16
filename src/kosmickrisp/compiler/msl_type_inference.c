@@ -761,6 +761,16 @@ msl_bitcast_for_src(struct hash_table *types, nir_src *src)
    }
 }
 
+const char *
+msl_bitcast_for_residency_src(struct hash_table *types, nir_src *src)
+{
+   ti_type src_type = get_type(types, src);
+   if (src_type == TYPE_UINT || src_type == TYPE_BOOL)
+      return NULL;
+
+   return ti_type_to_msl_type(src_type, 32, 1);
+}
+
 static void
 emit_src_component(struct nir_to_msl_ctx *ctx, nir_src *src, unsigned comp)
 {

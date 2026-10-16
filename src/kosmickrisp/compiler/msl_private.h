@@ -57,6 +57,8 @@ const char *msl_uint_type(uint8_t bit_size, uint8_t num_components);
 const char *msl_type_for_src(struct hash_table *types, nir_src *src);
 
 const char *msl_bitcast_for_src(struct hash_table *types, nir_src *src);
+const char *msl_bitcast_for_residency_src(struct hash_table *types,
+                                          nir_src *src);
 
 void msl_src_as_const(struct nir_to_msl_ctx *ctx, nir_src *src);
 

@@ -304,6 +304,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
+   if (dev->vk.enabled_extensions.EXT_sampler_filter_minmax)
+      dev->vk.enabled_features.samplerFilterMinmax = true;
+
    dev->vk.shader_ops = &kk_device_shader_ops;
    dev->mtl_handle = pdev->mtl_dev_handle;
    dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
