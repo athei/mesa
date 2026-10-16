@@ -74,6 +74,8 @@ kk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir,
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
+   NIR_PASS(_, nir, kk_nir_lower_denorm_preserve_ldexp);
+
    msl_preprocess_nir(nir);
 
    /* Cannot be part of msl_preprocess_nir since clc does not expose
@@ -1092,7 +1094,20 @@ kk_compile_msl(struct kk_physical_device *pdev, nir_shader *nir,
 {
    NIR_PASS(_, nir, kk_nir_lower_poly);
 
+   if (nir->info.float_controls_execution_mode &
+       FLOAT_CONTROLS_DENORM_PRESERVE_FP32) {
+      NIR_PASS(_, nir, nir_opt_algebraic);
+      NIR_PASS(_, nir, kk_nir_lower_denorm_preserve);
+   }
+   NIR_PASS(_, nir, kk_nir_lower_denorm_flush);
+
    msl_optimize_nir(nir);
+   bool canonicalized = false;
+   NIR_PASS(canonicalized, nir, kk_nir_lower_fcanonicalize);
+   if (canonicalized) {
+      NIR_PASS(_, nir, nir_opt_copy_prop);
+      NIR_PASS(_, nir, nir_opt_dce);
+   }
    modify_nir_info(nir);
 
    struct nir_to_msl_options translate_options = {
