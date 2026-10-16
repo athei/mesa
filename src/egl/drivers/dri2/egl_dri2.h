@@ -472,6 +472,9 @@ dri2_add_config(_EGLDisplay *disp, const struct dri_config *dri_config,
                 EGLint surface_type, const EGLint *attr_list);
 
 void
+dri2_add_configs_for_visuals(_EGLDisplay *disp, EGLint surface_type);
+
+void
 dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp);
 
 EGLint
