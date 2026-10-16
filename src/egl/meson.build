@@ -148,6 +148,11 @@ else
   error('No EGL driver available.')
 endif
 
+if with_platform_macos and with_gallium_zink
+  c_args_for_egl += '-DVK_USE_PLATFORM_METAL_EXT'
+  deps_for_egl += cc.find_library('objc')
+endif
+
 if cc.has_function('mincore')
   c_args_for_egl += '-DHAVE_MINCORE'
 endif
