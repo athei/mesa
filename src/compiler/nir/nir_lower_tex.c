@@ -1464,11 +1464,12 @@ nir_lower_lod_zero_width(nir_builder *b, nir_tex_instr *tex)
 }
 
 static void
-lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex)
+lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex, bool bias_32bit)
 {
    b->cursor = nir_before_instr(&tex->instr);
-   nir_def *bias = nir_build_texture_query(b, tex, nir_texop_lod_bias, 1,
-                                           nir_type_float16, false, false);
+   nir_def *bias = nir_build_texture_query(
+      b, tex, nir_texop_lod_bias, 1,
+      bias_32bit ? nir_type_float32 : nir_type_float16, false, false);
 
    if (tex->op == nir_texop_txd) {
       /* For txd, the computed level-of-detail is log2(rho) where rho should
@@ -1492,7 +1493,7 @@ lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex)
 
       nir_def *orig = nir_steal_tex_src(tex, src);
       if (orig) {
-         bias = nir_fadd(b, bias, nir_f2f16(b, orig));
+         bias = nir_fadd(b, bias, nir_f2fN(b, orig, bias->bit_size));
       }
 
       nir_tex_instr_add_src(tex, src, bias);
@@ -1820,7 +1821,7 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
       /* Although tg4 takes a sampler, it ignores the LOD bias. */
       if (options->lower_sampler_lod_bias &&
           nir_tex_instr_need_sampler(tex) && tex->op != nir_texop_tg4) {
-         lower_sampler_lod_bias(b, tex);
+         lower_sampler_lod_bias(b, tex, options->sampler_lod_bias_32bit);
          progress = true;
       }
 
