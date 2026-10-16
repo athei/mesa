@@ -36,6 +36,7 @@ struct kk_image_view {
        * render */
       mtl_texture *mtl_handle_render;
       bool render_is_view;
+      bool render_depth_plane;
 
       /* Input attachment handle. Required since input attachments needs to be
        * arrays, and sampled may not be */

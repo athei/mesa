@@ -111,7 +111,7 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
          uint8_t sampler_plane = MIN2(plane, sampler->plane_count - 1u);
          assert(sampler->planes[sampler_plane].hw->handle);
          desc[plane].sampler_index = sampler->planes[sampler_plane].hw->index;
-         desc[plane].sampler_lod_bias_fp16 = sampler->lod_bias_fp16;
+         desc[plane].sampler_lod_bias = sampler->lod_bias;
          desc[plane].sampler_lod_min_fp16 = sampler->lod_min_fp16;
          desc[plane].sampler_lod_max_fp16 = sampler->lod_max_fp16;
          desc[plane].sampler_minmax_flags = sampler->minmax_flags;
@@ -254,8 +254,7 @@ write_buffer_view_desc(struct kk_descriptor_set *set,
    if (bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(kk_buffer_view, view, bufferView);
 
-      assert(view->mtl_texel_buffer_handle);
-      assert(view->texel_buffer_gpu_id);
+      assert(view->rgb32_addr || view->texel_buffer_gpu_id);
 
       desc.image_gpu_resource_id = view->texel_buffer_gpu_id;
       desc.residency_gpu_resource_id = view->texel_buffer_gpu_id;
@@ -263,6 +262,7 @@ write_buffer_view_desc(struct kk_descriptor_set *set,
          view->offset_el |
          (view->residency_view << KK_TEXEL_BUFFER_VIEW_SHIFT);
       desc.buffer_size_el = view->vk.elements;
+      desc.buffer_rgb32_addr = view->rgb32_addr;
    }
    write_desc(set, binding, elem, &desc, sizeof(desc));
 }

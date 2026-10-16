@@ -169,6 +169,11 @@ mtl_set_stencil_references(mtl_render_encoder *encoder, uint32_t front,
 }
 
 void
+mtl_set_blend_color(mtl_render_encoder *encoder, const float color[4])
+{
+}
+
+void
 mtl_set_front_face_winding(mtl_render_encoder *encoder,
                            enum mtl_winding winding)
 {

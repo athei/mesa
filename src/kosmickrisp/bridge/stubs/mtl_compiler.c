@@ -81,6 +81,25 @@ mtl_render_pipeline_descriptor_set_raster_sample_count(
 }
 
 void
+mtl_render_pipeline_descriptor_set_alpha_to_coverage(
+   mtl_render_pipeline_descriptor *descriptor, bool enabled)
+{
+}
+
+void
+mtl_render_pipeline_descriptor_set_alpha_to_one(
+   mtl_render_pipeline_descriptor *descriptor, bool enabled)
+{
+}
+
+void
+mtl_render_pipeline_descriptor_set_color_attachment_blend(
+   mtl_render_pipeline_descriptor *descriptor, uint8_t index,
+   const struct mtl_color_attachment_blend *blend)
+{
+}
+
+void
 mtl_render_pipeline_descriptor_set_rasterization_enabled(
    mtl_render_pipeline_descriptor *descriptor, bool enabled)
 {

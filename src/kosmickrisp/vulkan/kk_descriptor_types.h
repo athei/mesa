@@ -19,7 +19,7 @@ struct kk_sampled_image_descriptor {
     */
    int16_t clamp_0_sampler_index_or_negative;
 
-   uint16_t sampler_lod_bias_fp16;
+   uint16_t pad_lod_bias;
    uint16_t sampler_lod_min_fp16;
    uint16_t sampler_lod_max_fp16;
 
@@ -30,7 +30,8 @@ struct kk_sampled_image_descriptor {
    uint32_t border[4];
    uint64_t residency_gpu_resource_id;
    uint16_t image_flags;
-   uint16_t pad16[3];
+   uint16_t pad16;
+   float sampler_lod_bias;
    uint64_t pad_to_power_2;
 };
 
@@ -42,7 +43,7 @@ struct kk_storage_image_descriptor {
    uint32_t buffer_offset_el;
    uint32_t buffer_size_el;
    uint64_t residency_gpu_resource_id;
-   uint64_t pad_to_power_2;
+   uint64_t buffer_rgb32_addr;
 };
 
 static_assert(sizeof(struct kk_storage_image_descriptor) == 32,

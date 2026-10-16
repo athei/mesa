@@ -9,6 +9,14 @@
 #include "util/string_buffer.h"
 #include "nir.h"
 
+struct io_component_info {
+   nir_alu_type type;
+   uint32_t interpolation;
+   bool centroid;
+   bool sample;
+   bool uses_interpolant;
+};
+
 struct io_slot_info {
    nir_alu_type type;
    uint32_t interpolation;
@@ -16,6 +24,8 @@ struct io_slot_info {
    bool centroid;
    bool sample;
    bool uses_interpolant;
+   unsigned component_mask;
+   struct io_component_info components[4];
 };
 
 struct nir_to_msl_ctx {
@@ -78,6 +88,9 @@ void msl_output_name(struct nir_to_msl_ctx *ctx, unsigned location,
 
 uint32_t msl_input_num_components(struct nir_to_msl_ctx *ctx,
                                   uint32_t location);
+
+bool msl_input_uses_interpolant(struct nir_to_msl_ctx *ctx, uint32_t location,
+                                uint32_t component);
 
 uint32_t msl_output_num_components(struct nir_to_msl_ctx *ctx,
                                    uint32_t location);

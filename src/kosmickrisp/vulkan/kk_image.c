@@ -1179,6 +1179,10 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
       array_layout.type = MTL_TEXTURE_TYPE_2D_ARRAY;
       array_layout.layers = array_layout.layers * array_layout.depth_px;
       array_layout.depth_px = 1u;
+      array_layout.levels =
+         MIN2(array_layout.levels,
+              util_logbase2(MAX2(array_layout.width_px,
+                                 array_layout.height_px)) + 1u);
       plane->mtl_handle_array = mtl_new_texture_with_descriptor(
          mem->bo->mtl_handle, &array_layout, *offset_B);
       if (plane->mtl_handle_array == NULL)
