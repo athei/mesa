@@ -112,7 +112,8 @@ KERNEL(1024)
 libkk_dgc_unroll(global struct poly_heap *heap, constant uint32_t *in_draws,
                  global uint32_t *out_draws, constant uint32_t *ib_info,
                  uint32_t in_draw_stride_el, uint32_t restart,
-                 uint32_t flatshade_first, uint32_t mode)
+                 uint32_t flatshade_first, uint32_t emulate_flatshade_last,
+                 uint32_t mode)
 {
    uint gid = cl_group_id.x;
    constant uint32_t *info = ib_info + gid * 4;
@@ -126,6 +127,6 @@ libkk_dgc_unroll(global struct poly_heap *heap, constant uint32_t *in_draws,
    POLY_DECL_UNROLL_RESTART_SCRATCH(scratch, 1024);
    poly_unroll_geometry(out_draws + gid * 5, heap,
                         in_draws + gid * in_draw_stride_el, index_buffer,
-                        info[2], el_B, 4u, restart_index, flatshade_first, true,
-                        mode, scratch);
+                        info[2], el_B, 4u, restart_index, flatshade_first,
+                        emulate_flatshade_last, mode, scratch);
 }

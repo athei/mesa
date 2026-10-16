@@ -50,11 +50,24 @@ libkk_gs_setup_indirect(uint64_t index_buffer, constant uint *draw,
                         global struct poly_heap *heap, uint64_t vs_outputs,
                         uint32_t index_size_B, uint32_t index_buffer_range_el,
                         uint32_t prim, uint32_t max_indices,
-                        enum poly_gs_shape shape, uint32_t prefix_sum)
+                        enum poly_gs_shape shape, uint32_t prefix_sum,
+                        uint32_t vertex_buffer_stride)
 {
    poly_gs_setup_indirect(index_buffer, draw, vp, p, heap, vs_outputs,
                           index_size_B, index_buffer_range_el, prim,
                           prefix_sum, max_indices, shape);
+
+   if (vertex_buffer_stride) {
+      p->vertex_buffer = (global uchar *)poly_heap_alloc(
+         heap, p->input_primitives * vertex_buffer_stride, 16);
+   }
+
+   vp->groups[0] = (vp->grid[0] + vp->grid[3] - 1) / vp->grid[3];
+   vp->groups[1] = vp->grid[1];
+   vp->groups[2] = 1;
+   p->groups[0] = (p->grid[0] + p->grid[3] - 1) / p->grid[3];
+   p->groups[1] = p->grid[1];
+   p->groups[2] = 1;
 }
 
 KERNEL(1024)
