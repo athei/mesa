@@ -1050,6 +1050,7 @@ validate_tex_src_texture_deref(nir_tex_instr *instr, validate_state *state,
    case nir_texop_descriptor_amd:
    case nir_texop_sampler_descriptor_amd:
    case nir_texop_custom_border_color_agx:
+   case nir_texop_sampler_minmax_kk:
       break;
    case nir_texop_lod:
    case nir_texop_lod_bias:

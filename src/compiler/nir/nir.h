@@ -2691,6 +2691,8 @@ typedef enum nir_texop {
    nir_texop_has_custom_border_color_agx,
    /** Returns the sampler's custom border colour (if has_custom_border_agx) */
    nir_texop_custom_border_color_agx,
+   /** Returns the sampler's emulated min/max reduction flags */
+   nir_texop_sampler_minmax_kk,
    /** Maps to TXQ.DIMENSION */
    nir_texop_hdr_dim_nv,
    /** Maps to TXQ.TEXTURE_TYPE */
