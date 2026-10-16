@@ -57,6 +57,7 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
    }
    util_dynarray_clear(&cmd->large_bos);
    util_dynarray_clear(&cmd->post_render_writes);
+   util_dynarray_clear(&cmd->post_render_stats);
    util_dynarray_clear(&cmd->ts_resolves);
    util_dynarray_clear(&cmd->ts_stage_map);
    kk_timestamp_entries_release(dev, &cmd->ts_entries);
@@ -99,6 +100,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    kk_cmd_release_resources(dev, cmd);
    util_dynarray_fini(&cmd->large_bos);
    util_dynarray_fini(&cmd->post_render_writes);
+   util_dynarray_fini(&cmd->post_render_stats);
    util_dynarray_fini(&cmd->ts_resolves);
    util_dynarray_fini(&cmd->ts_stage_map);
    util_dynarray_fini(&cmd->ts_entries);
@@ -135,6 +137,7 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->ts_stage_map = UTIL_DYNARRAY_INIT;
    cmd->ts_entries = UTIL_DYNARRAY_INIT;
    cmd->post_render_writes = UTIL_DYNARRAY_INIT;
+   cmd->post_render_stats = UTIL_DYNARRAY_INIT;
 
    {
       mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
@@ -355,8 +358,79 @@ end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
 }
 
 static void
+kk_run_stats_ops(struct kk_cmd_buffer *cmd, const struct kk_stats_op *ops,
+                 uint32_t count)
+{
+   uint32_t i = 0;
+   while (i < count) {
+      const struct kk_stats_op *op = &ops[i];
+      if (!op->draws) {
+         libkk_add_u64(cmd, kk_grid_1d(1), true, op->counter[0], op->value);
+         i++;
+         continue;
+      }
+
+      if (op->index_size_B) {
+         libkk_stats_restart_draws(
+            cmd, kk_grid_1d(1024), true, op->draws, op->stride_el, op->count,
+            op->index_buffer, op->index_buffer_size_el, op->index_size_B,
+            op->restart_index, op->prim, op->counter[0], op->counter[1],
+            op->counter[2], op->counter[3], op->counter[4]);
+         i++;
+         continue;
+      }
+
+      uint32_t end = i, total = 0;
+      while (end < count && ops[end].draws && !ops[end].index_size_B &&
+             !memcmp(ops[end].counter, op->counter, sizeof(op->counter))) {
+         total += ops[end].count;
+         end++;
+      }
+
+      struct kk_ptr entries = kk_pool_alloc(
+         cmd, MAX2(total, 1u) * sizeof(struct libkk_stats_draw), 8u);
+      if (likely(entries.cpu) && total) {
+         struct libkk_stats_draw *e = entries.cpu;
+         for (uint32_t j = i; j < end; j++) {
+            for (uint32_t k = 0; k < ops[j].count; k++) {
+               *(e++) = (struct libkk_stats_draw){
+                  .draw = ops[j].draws +
+                          (uint64_t)k * ops[j].stride_el * sizeof(uint32_t),
+                  .prim = ops[j].prim,
+                  .patch_size = ops[j].patch_size,
+               };
+            }
+         }
+
+         libkk_stats_draws(cmd, kk_grid_1d(1024), true, entries.gpu, total,
+                           op->counter[0], op->counter[1], op->counter[2],
+                           op->counter[3], op->counter[4], op->counter[5]);
+      }
+      i = end;
+   }
+}
+
+void
+kk_cmd_stats_op(struct kk_cmd_buffer *cmd, const struct kk_stats_op *op)
+{
+   if (cmd->metal.render)
+      util_dynarray_append(&cmd->post_render_stats, *op);
+   else
+      kk_run_stats_ops(cmd, op, 1u);
+}
+
+static void
 flush_post_render_writes(struct kk_cmd_buffer *cmd)
 {
+   assert(cmd->metal.render == NULL);
+
+   uint32_t stats_count = util_dynarray_num_elements(&cmd->post_render_stats,
+                                                     struct kk_stats_op);
+   if (stats_count) {
+      kk_run_stats_ops(cmd, cmd->post_render_stats.data, stats_count);
+      util_dynarray_clear(&cmd->post_render_stats);
+   }
+
    assert(cmd->metal.render == NULL);
 
    if (!util_dynarray_num_elements(&cmd->post_render_writes,

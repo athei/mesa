@@ -171,6 +171,8 @@ kk_reports_per_query(struct kk_query_pool *pool)
       return 1;
    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
       return 2;
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
+      return util_bitcount(pool->vk.pipeline_statistics);
    default:
       UNREACHABLE("Unsupported query type");
    }
@@ -589,6 +591,23 @@ kk_CmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       return;
    }
 
+   if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
+      struct kk_stats_state *stats = &cmd->state.stats;
+      uint64_t report = kk_query_report_addr(dev, pool, query);
+      uint32_t enabled = pool->vk.pipeline_statistics;
+
+      memset(stats, 0, sizeof(*stats));
+      u_foreach_bit(i, enabled) {
+         if (i < KK_STAT_COUNT) {
+            stats->addr[i] =
+               report + util_bitcount(enabled & BITFIELD_MASK(i)) *
+                           sizeof(struct kk_query_report);
+         }
+      }
+      stats->active = true;
+      return;
+   }
+
    cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
                                       ? MTL_VISIBILITY_RESULT_MODE_COUNTING
                                       : MTL_VISIBILITY_RESULT_MODE_BOOLEAN;
@@ -606,6 +625,17 @@ kk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
 
    if (pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT) {
       cmd->state.gfx.xfb.queries[index] = 0;
+   } else if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
+      struct kk_stats_state *stats = &cmd->state.stats;
+      for (uint32_t i = 0; i < KK_STAT_COUNT; i++) {
+         if (stats->addr[i] && stats->pending[i]) {
+            kk_cmd_stats_op(cmd, &(struct kk_stats_op){
+                                    .counter[0] = stats->addr[i],
+                                    .value = stats->pending[i],
+                                 });
+         }
+      }
+      memset(stats, 0, sizeof(*stats));
    } else {
       cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
       cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;

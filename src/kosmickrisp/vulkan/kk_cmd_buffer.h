@@ -99,6 +99,7 @@ struct kk_per_draw_data {
    uint32_t rasterization_stream;
 
    uint64_t sink;
+   uint64_t fs_invocations;
 };
 
 struct kk_attachment {
@@ -155,6 +156,7 @@ struct kk_graphics_state {
    struct kk_per_draw_data per_draw_data;
 
    mtl_depth_stencil_state *depth_stencil_state;
+   bool fs_stats_bound;
    mtl_render_pass_descriptor *render_pass_descriptor;
    bool is_depth_stencil_dynamic;
    bool is_cull_front_and_back;
@@ -189,6 +191,7 @@ struct kk_graphics_state {
       /* Grid buffer for when the draw is indirect */
       struct kk_ptr indirect_ptr;
       uint64_t out_draws_addr;
+      uint64_t statistic;
       struct kk_tess_info info;
       enum mesa_prim prim;
    } tess;
@@ -213,6 +216,42 @@ struct kk_graphics_state {
 
 struct kk_compute_state {
    struct kk_descriptor_state descriptors;
+};
+
+enum kk_stat {
+   KK_STAT_IA_VERTICES,
+   KK_STAT_IA_PRIMITIVES,
+   KK_STAT_VS_INVOCATIONS,
+   KK_STAT_GS_INVOCATIONS,
+   KK_STAT_GS_PRIMITIVES,
+   KK_STAT_C_INVOCATIONS,
+   KK_STAT_C_PRIMITIVES,
+   KK_STAT_FS_INVOCATIONS,
+   KK_STAT_TCS_PATCHES,
+   KK_STAT_TES_INVOCATIONS,
+   KK_STAT_CS_INVOCATIONS,
+   KK_STAT_COUNT,
+};
+
+struct kk_stats_state {
+   uint64_t addr[KK_STAT_COUNT];
+   uint64_t pending[KK_STAT_COUNT];
+   bool active;
+};
+
+
+struct kk_stats_op {
+   uint64_t draws;
+   uint64_t counter[6];
+   uint64_t value;
+   uint32_t stride_el;
+   uint32_t count;
+   uint32_t prim;
+   uint32_t patch_size;
+   uint64_t index_buffer;
+   uint32_t index_buffer_size_el;
+   uint32_t index_size_B;
+   uint32_t restart_index;
 };
 
 struct kk_conditional_rendering_state {
@@ -266,6 +305,7 @@ struct kk_cmd_buffer {
    struct util_dynarray ts_entries;
    /* Deferred writes due to being mid render encoder */
    struct util_dynarray post_render_writes;
+   struct util_dynarray post_render_stats;
 
    void *drawable;
    mtl_argument_table *argument_table;
@@ -274,6 +314,7 @@ struct kk_cmd_buffer {
       struct kk_graphics_state gfx;
       struct kk_compute_state cs;
       struct kk_conditional_rendering_state cond_render;
+      struct kk_stats_state stats;
       struct kk_shader *shaders[MESA_SHADER_STAGES];
       /* Address of the binding 0 for when compute dispatches modify it.
        * We are trying to be nice to ourselves. */
@@ -446,6 +487,7 @@ void kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
 #define MESA_DISPATCH_PRECOMP kk_dispatch_precomp
 
 void kk_cmd_write(struct kk_cmd_buffer *cmd, struct libkk_imm_write write);
+void kk_cmd_stats_op(struct kk_cmd_buffer *cmd, const struct kk_stats_op *op);
 
 void kk_cmd_buffer_set_label(struct kk_cmd_buffer *cb, const char *label);
 

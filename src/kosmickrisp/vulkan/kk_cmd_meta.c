@@ -81,6 +81,7 @@ struct kk_meta_save {
       };
    } pipeline;
    struct kk_conditional_rendering_state cond_render;
+   struct kk_stats_state stats;
    struct kk_descriptor_set *desc0;
    struct kk_push_descriptor_set *push_desc0;
    struct kk_addr_range vb0;
@@ -121,6 +122,9 @@ kk_meta_begin(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
 
    save->cond_render = cmd->state.cond_render;
    cmd->state.cond_render.enabled = false;
+
+   save->stats = cmd->state.stats;
+   memset(&cmd->state.stats, 0, sizeof(cmd->state.stats));
 
    save->vb0 = cmd->state.gfx.vb.addr_range[0];
 
@@ -196,6 +200,7 @@ kk_meta_end(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
    }
 
    cmd->state.cond_render = save->cond_render;
+   cmd->state.stats = save->stats;
 
    memcpy(desc->root.push, save->push, sizeof(save->push));
 }

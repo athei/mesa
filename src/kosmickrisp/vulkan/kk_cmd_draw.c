@@ -852,6 +852,31 @@ kk_gs_is_passthrough(struct kk_cmd_buffer *cmd)
    return vs && vs->info.vs.xfb_passthrough;
 }
 
+static uint64_t
+kk_stats_fs_counter(struct kk_cmd_buffer *cmd)
+{
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   if (!vs || !vs->info.has_fs_stats)
+      return 0u;
+
+   return cmd->state.stats.addr[KK_STAT_FS_INVOCATIONS];
+}
+
+static bool
+kk_stats_real_gs(struct kk_cmd_buffer *cmd)
+{
+   return kk_gs_info(cmd) && !kk_gs_is_passthrough(cmd);
+}
+
+static bool
+kk_stats_gs_counts(struct kk_cmd_buffer *cmd)
+{
+   struct kk_stats_state *stats = &cmd->state.stats;
+   return kk_stats_real_gs(cmd) && (stats->addr[KK_STAT_GS_PRIMITIVES] ||
+                                    stats->addr[KK_STAT_C_INVOCATIONS] ||
+                                    stats->addr[KK_STAT_C_PRIMITIVES]);
+}
+
 /* The GS output primitive if one is bound, otherwise the input topology */
 static enum mesa_prim
 kk_rast_prim(struct kk_cmd_buffer *cmd)
@@ -1016,9 +1041,21 @@ kk_flush_pipeline(struct kk_cmd_buffer *cmd)
       mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
    }
 
-   if (IS_SHADER_DIRTY(VERTEX)) {
+   bool fs_stats = kk_stats_fs_counter(cmd) != 0u;
+   if (IS_SHADER_DIRTY(VERTEX) || fs_stats != gfx->fs_stats_bound) {
       struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
-      mtl_render_set_pipeline_state(enc, vs->pipeline.gfx.render);
+      mtl_render_pipeline_state *render = vs->pipeline.gfx.render;
+      if (fs_stats) {
+         mtl_render_pipeline_state *counted =
+            kk_shader_get_stats_pipeline(device, vs);
+         if (counted)
+            render = counted;
+         else
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+      mtl_render_set_pipeline_state(enc, render);
+      gfx->fs_stats_bound = fs_stats;
       if (gfx->depth_stencil_state)
          mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
    }
@@ -1221,10 +1258,19 @@ kk_upload_tess_params(struct kk_cmd_buffer *cmd, struct poly_tess_params *out,
          ? POLY_TESS_PARTITIONING_FRACTIONAL_ODD
          : POLY_TESS_PARTITIONING_FRACTIONAL_EVEN;
 
+   gfx->tess.statistic = 0u;
+   if (cmd->state.stats.addr[KK_STAT_TES_INVOCATIONS]) {
+      struct kk_ptr counter = kk_pool_alloc(cmd, sizeof(uint32_t), 4u);
+      if (counter.cpu) {
+         *(uint32_t *)counter.cpu = 0u;
+         gfx->tess.statistic = counter.gpu;
+      }
+   }
+
    struct poly_tess_params args = {
       .heap = kk_heap(cmd),
       .tcs_stride_el = tcs->info.tess.tcs_output_stride / 4,
-      .statistic = 0u,
+      .statistic = gfx->tess.statistic,
       .input_patch_size = dyn->ts.patch_control_points,
       .output_patch_size = tcs->info.tess.tcs_output_patch_size,
       .tcs_patch_constants = tcs->info.tess.tcs_nr_patch_outputs,
@@ -1321,8 +1367,16 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
    struct poly_geometry_params params;
    poly_geometry_params_init(&params, mode, wg_size);
 
-   if (gs->prefix_sum)
+   if (gs->prefix_sum) {
       params.count_buffer_stride = gs->count_words * sizeof(uint32_t);
+   } else if (gs->count_words && kk_stats_gs_counts(cmd)) {
+      uint32_t size_B = gs->count_words * sizeof(uint32_t);
+      struct kk_ptr counts = kk_pool_alloc(cmd, size_B, 4u);
+      if (counts.cpu) {
+         memset(counts.cpu, 0, size_B);
+         params.count_buffer = counts.gpu;
+      }
+   }
 
    uint64_t sink = gfx->per_draw_data.sink;
    bool xfb_active = gfx->xfb.offsets != 0;
@@ -1817,7 +1871,8 @@ build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
    }
 
    struct kk_shader *fragment = cmd->state.shaders[MESA_SHADER_FRAGMENT];
-   if (fragment && fragment->info.uses_per_draw_data) {
+   if ((fragment && fragment->info.uses_per_draw_data) ||
+       kk_stats_fs_counter(cmd)) {
       mask |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
    }
 
@@ -2092,6 +2147,7 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
 {
    struct kk_graphics_state *gfx = &cmd->state.gfx;
    gfx->per_draw_data.draw_id = draw_id;
+   gfx->per_draw_data.fs_invocations = kk_stats_fs_counter(cmd);
 
    /* Prepare emulation data for tessellation and GS. */
    bool tess = upload_mask & BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
@@ -2228,6 +2284,18 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
    libkk_tessellate(cmd, grid_tess, true, info.mode, POLY_TESS_MODE_WITH_COUNTS,
                     state);
 
+   struct kk_stats_state *stats = &cmd->state.stats;
+   bool clip = !kk_stats_real_gs(cmd);
+   uint64_t c_invocations = clip ? stats->addr[KK_STAT_C_INVOCATIONS] : 0u;
+   uint64_t c_primitives = clip ? stats->addr[KK_STAT_C_PRIMITIVES] : 0u;
+   if (gfx->tess.statistic || c_invocations || c_primitives) {
+      uint32_t verts_per_prim = mesa_vertices_per_prim(gfx->tess.prim);
+      libkk_tess_stats(cmd, kk_grid_1d(1), true, gfx->tess.out_draws_addr,
+                       gfx->tess.statistic, verts_per_prim,
+                       stats->addr[KK_STAT_TES_INVOCATIONS], c_invocations,
+                       c_primitives);
+   }
+
    draw.grid = kk_grid_indirect(gfx->tess.out_draws_addr);
 
    draw.index.gpu = kk_heap_indices(cmd);
@@ -2336,12 +2404,15 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
       enc, vs->pipeline.gfx.pre_render[pre_render_count - 2u]);
    kk_dispatch_compute(enc, grid_vs, local_size);
 
-   if (gs->prefix_sum) {
+   bool stats_counts = kk_stats_gs_counts(cmd);
+   if (gs->prefix_sum || (gs->count_words && stats_counts)) {
       mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
                                        MTL_STAGE_DISPATCH);
       mtl_compute_set_pipeline_state(enc, vs->pipeline.gfx.gs_count);
       kk_dispatch_compute(enc, grid_gs, local_size);
+   }
 
+   if (gs->prefix_sum) {
       libkk_prefix_sum_geom(cmd, kk_grid_1d(1024u * gs->count_words), true,
                             geometry_params);
    }
@@ -2358,6 +2429,23 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
    mtl_compute_set_pipeline_state(
       enc, vs->pipeline.gfx.pre_render[pre_render_count - 1u]);
    kk_dispatch_compute(enc, grid_gs, local_size);
+
+   struct kk_stats_state *stats = &cmd->state.stats;
+   if (!kk_gs_is_passthrough(cmd) &&
+       (stats->addr[KK_STAT_GS_INVOCATIONS] || stats_counts)) {
+      const struct vk_dynamic_graphics_state *dyn =
+         &cmd->vk.dynamic_graphics_state;
+      libkk_gs_stats(cmd, kk_grid_1d(1), true, geometry_params,
+                     gs->invocations, gs->count_words, gs->prefix_sum,
+                     dyn->rs.rasterization_stream, gs->static_count[0],
+                     gs->static_count[1], gs->static_count[2],
+                     gs->static_count[3], gs->count_index[0],
+                     gs->count_index[1], gs->count_index[2],
+                     gs->count_index[3], stats->addr[KK_STAT_GS_INVOCATIONS],
+                     stats->addr[KK_STAT_GS_PRIMITIVES],
+                     stats->addr[KK_STAT_C_INVOCATIONS],
+                     stats->addr[KK_STAT_C_PRIMITIVES]);
+   }
 
    struct kk_draw_data rast = {
       .primitive_type = mesa_prim_to_mtl_primitive_type(gs->mode),
@@ -2427,12 +2515,101 @@ struct kk_draw_roots {
 };
 
 static void
+kk_stats_draw(struct kk_cmd_buffer *cmd, const struct kk_draw_command *data)
+{
+   struct kk_stats_state *stats = &cmd->state.stats;
+   bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
+   bool clip = !tess && !kk_stats_real_gs(cmd);
+   uint32_t patch_size =
+      tess ? cmd->vk.dynamic_graphics_state.ts.patch_control_points : 0u;
+
+   struct kk_stats_op op = {
+      .counter =
+         {
+            stats->addr[KK_STAT_IA_VERTICES],
+            stats->addr[KK_STAT_IA_PRIMITIVES],
+            stats->addr[KK_STAT_VS_INVOCATIONS],
+            clip ? stats->addr[KK_STAT_C_INVOCATIONS] : 0u,
+            clip ? stats->addr[KK_STAT_C_PRIMITIVES] : 0u,
+            tess ? stats->addr[KK_STAT_TCS_PATCHES] : 0u,
+         },
+      .prim = data->prim,
+      .patch_size = patch_size,
+   };
+
+   bool any = false;
+   for (uint32_t i = 0; i < ARRAY_SIZE(op.counter); i++)
+      any |= op.counter[i] != 0;
+   if (!any)
+      return;
+
+   if (data->indexed && data->restart && !patch_size) {
+      op.index_buffer = data->index_buffer.addr;
+      op.index_buffer_size_el =
+         data->index_buffer.range / data->index_buffer_el_size_B;
+      op.index_size_B = data->index_buffer_el_size_B;
+      op.restart_index = data->restart_index;
+      op.count = data->draw_count;
+
+      if (data->indirect) {
+         op.draws = data->indirect_command.addr;
+         op.stride_el = data->indirect_command.stride / sizeof(uint32_t);
+      } else {
+         size_t size_B =
+            data->draw_count * sizeof(VkDrawIndexedIndirectCommand);
+         struct kk_ptr draws = kk_pool_alloc(cmd, size_B, 4u);
+         if (!draws.cpu)
+            return;
+         memcpy(draws.cpu, data->indexed_draws, size_B);
+         op.draws = draws.gpu;
+         op.stride_el = sizeof(VkDrawIndexedIndirectCommand) / sizeof(uint32_t);
+      }
+      kk_cmd_stats_op(cmd, &op);
+      return;
+   }
+
+   if (data->indirect) {
+      op.draws = data->indirect_command.addr;
+      op.stride_el = data->indirect_command.stride / sizeof(uint32_t);
+      op.count = data->draw_count;
+      kk_cmd_stats_op(cmd, &op);
+      return;
+   }
+
+   for (uint32_t i = 0; i < data->draw_count; i++) {
+      uint32_t count = data->indexed ? data->indexed_draws[i].indexCount
+                                     : data->draws[i].vertexCount;
+      uint32_t instances = data->indexed ? data->indexed_draws[i].instanceCount
+                                         : data->draws[i].instanceCount;
+      uint64_t vertices = (uint64_t)count * instances;
+      uint64_t prims =
+         (uint64_t)(patch_size
+                       ? count / patch_size
+                       : u_decomposed_prims_for_vertices(data->prim, count)) *
+         instances;
+
+      stats->pending[KK_STAT_IA_VERTICES] += vertices;
+      stats->pending[KK_STAT_IA_PRIMITIVES] += prims;
+      stats->pending[KK_STAT_VS_INVOCATIONS] += vertices;
+      if (clip) {
+         stats->pending[KK_STAT_C_INVOCATIONS] += prims;
+         stats->pending[KK_STAT_C_PRIMITIVES] += prims;
+      }
+      if (tess)
+         stats->pending[KK_STAT_TCS_PATCHES] += prims;
+   }
+}
+
+static void
 kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
                 const struct kk_draw_roots *roots)
 {
    /* Convert to indirect and process predicates. Skip draw if we fail. */
    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))
       return;
+
+   if (cmd->state.stats.active && !roots)
+      kk_stats_draw(cmd, data);
 
    bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
    bool geom = kk_gs_info(cmd);
@@ -2909,6 +3086,9 @@ kk_cmd_draw_generated(struct kk_cmd_buffer *cmd,
       .indirect_command.stride = bufs.cmd_stride_B,
    };
    kk_set_draw_state(cmd, &data);
+
+   if (cmd->state.stats.active)
+      kk_stats_draw(cmd, &data);
 
    if (params.has_ib && data.indexed) {
       bool emulated = cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
