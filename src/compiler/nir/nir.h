@@ -6645,6 +6645,12 @@ typedef struct nir_lower_tex_options {
     */
    bool lower_sampler_lod_bias;
 
+   /**
+    * If true, the sampler LOD bias is queried and added as a 32-bit float
+    * instead of a 16-bit one.
+    */
+   bool sampler_lod_bias_32bit;
+
    /* Turns nir_op_tex and other ops with an implicit derivative, in stages
     * without implicit derivatives (like the vertex shader) to have an explicit
     * LOD with a value of 0.
