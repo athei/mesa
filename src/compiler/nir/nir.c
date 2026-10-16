@@ -3547,6 +3547,7 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_image_min_lod_agx:
    case nir_texop_has_custom_border_color_agx:
+   case nir_texop_sampler_minmax_kk:
    case nir_texop_sparse_residency_intel:
    case nir_texop_sparse_residency_txf_intel:
       return 1;
@@ -3602,6 +3603,7 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_image_min_lod_agx:
    case nir_texop_custom_border_color_agx:
    case nir_texop_has_custom_border_color_agx:
+   case nir_texop_sampler_minmax_kk:
    case nir_texop_hdr_dim_nv:
    case nir_texop_tex_type_nv:
    case nir_texop_sample_pos_nv:

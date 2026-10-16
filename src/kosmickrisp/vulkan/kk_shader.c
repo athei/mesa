@@ -172,12 +172,16 @@ enum kk_feature_key {
    KK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(0),
    KK_FEAT_NULL_DESCRIPTOR = BITFIELD_BIT(1),
    KK_FEAT_IMAGE_VIEW_MIN_LOD = BITFIELD_BIT(2),
+   KK_FEAT_SAMPLER_MINMAX = BITFIELD_BIT(3),
 };
 
 static enum kk_feature_key
-kk_make_feature_key(const struct vk_features *feats)
+kk_make_feature_key(const struct kk_physical_device *pdev,
+                    const struct vk_features *feats)
 {
    enum kk_feature_key key = 0;
+   if (feats->samplerFilterMinmax && !kk_has_native_sampler_minmax(pdev))
+      key |= KK_FEAT_SAMPLER_MINMAX;
    if (feats->customBorderColors)
       key |= KK_FEAT_CUSTOM_BORDER;
    if (feats->nullDescriptor)
@@ -211,7 +215,10 @@ kk_hash_graphics_state(struct vk_physical_device *device,
                           sizeof(state->mv->view_mask));
    }
 
-   enum kk_feature_key feature_key = kk_make_feature_key(enabled_features);
+   struct kk_physical_device *pdev =
+      container_of(device, struct kk_physical_device, vk);
+   enum kk_feature_key feature_key =
+      kk_make_feature_key(pdev, enabled_features);
    _mesa_blake3_update(&blake3_ctx, &feature_key, sizeof(feature_key));
 
    _mesa_blake3_final(&blake3_ctx, blake3_out);
@@ -796,6 +803,9 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
 
    if (features & KK_FEAT_IMAGE_VIEW_MIN_LOD)
       NIR_PASS(_, nir, kk_nir_lower_image_view_min_lod);
+
+   if (features & KK_FEAT_SAMPLER_MINMAX)
+      NIR_PASS(_, nir, kk_nir_lower_sampler_minmax);
 
    /* Descriptor lowering needs to happen after lowering blend since we will
     * generate a nir_intrinsic_load_blend_const_color_rgba which gets lowered by
@@ -1931,7 +1941,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
    struct kk_device *dev = container_of(device, struct kk_device, vk);
    struct kk_physical_device *pdev = kk_device_physical(dev);
 
-   enum kk_feature_key features = kk_make_feature_key(enabled_features);
+   enum kk_feature_key features = kk_make_feature_key(pdev, enabled_features);
 
    /* Vulkan doesn't enforce a fragment shader to build pipelines. We may need
     * to create one. */
