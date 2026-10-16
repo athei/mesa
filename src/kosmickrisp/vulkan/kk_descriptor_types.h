@@ -36,9 +36,11 @@ static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,
 
 struct kk_storage_image_descriptor {
    uint64_t image_gpu_resource_id;
+   uint32_t buffer_offset_el;
+   uint32_t buffer_size_el;
 };
 
-static_assert(sizeof(struct kk_storage_image_descriptor) == 8,
+static_assert(sizeof(struct kk_storage_image_descriptor) == 16,
               "kk_storage_image_descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */
