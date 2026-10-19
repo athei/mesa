@@ -254,6 +254,20 @@ kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+static void
+kk_device_finish_sparse_residency(struct kk_device *dev)
+{
+   if (dev->sparse_residency.bo == NULL)
+      return;
+
+   util_vma_heap_finish(&dev->sparse_residency.heap);
+   util_idalloc_fini(&dev->sparse_residency.views);
+   util_idalloc_fini(&dev->sparse_residency.tags);
+   simple_mtx_destroy(&dev->sparse_residency.lock);
+   kk_destroy_bo(dev, dev->sparse_residency.bo);
+   dev->sparse_residency.bo = NULL;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 kk_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
@@ -329,9 +343,28 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_query_table;
 
+   if (dev->vk.enabled_features.sparseResidencyBuffer) {
+      uint64_t header_B = KK_SPARSE_RESIDENCY_HEADER_SIZE;
+      uint64_t size_B =
+         header_B + KK_SPARSE_ADDR_SPACE_SIZE / KK_SPARSE_PAGE_SIZE;
+      result = kk_alloc_bo(dev, &dev->vk.base, size_B, 8u,
+                           &dev->sparse_residency.bo);
+      if (result != VK_SUCCESS)
+         goto fail_sampler_heap;
+
+      *(uint32_t *)dev->sparse_residency.bo->cpu = 0u;
+      util_vma_heap_init(&dev->sparse_residency.heap, header_B,
+                         size_B - header_B);
+      util_idalloc_init(&dev->sparse_residency.views, 16u);
+      util_idalloc_alloc(&dev->sparse_residency.views);
+      util_idalloc_init(&dev->sparse_residency.tags, 16u);
+      util_idalloc_alloc(&dev->sparse_residency.tags);
+      simple_mtx_init(&dev->sparse_residency.lock, mtx_plain);
+   }
+
    result = kk_device_init_lib(dev);
    if (result != VK_SUCCESS)
-      goto fail_sampler_heap;
+      goto fail_sparse_residency;
 
    if (pdev->settings.gpu_capture_immediately) {
       mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
@@ -342,6 +375,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_sparse_residency:
+   kk_device_finish_sparse_residency(dev);
 fail_sampler_heap:
    kk_destroy_sampler_heap(dev, &dev->samplers);
 fail_query_table:
@@ -389,6 +424,8 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    /* Geometry heap */
    if (dev->heap)
       kk_destroy_bo(dev, dev->heap);
+
+   kk_device_finish_sparse_residency(dev);
 
    if (dev->has_queue) {
       kk_queue_finish(dev, &dev->queue);

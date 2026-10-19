@@ -70,6 +70,9 @@ mtl_new_texture_with_descriptor_linear(mtl_buffer *buffer,
       id<MTLBuffer> buf = (id<MTLBuffer>)buffer;
       MTLTextureDescriptor *descriptor = [mtl_new_texture_descriptor(layout) autorelease];
       descriptor.resourceOptions = buf.resourceOptions;
+      if ([buf respondsToSelector:@selector(sparseBufferTier)] &&
+          buf.sparseBufferTier != MTLBufferSparseTierNone)
+         descriptor.placementSparsePageSize = MTLSparsePageSize64;
       id<MTLTexture> texture = [buf newTextureWithDescriptor:descriptor offset:offset bytesPerRow:layout->linear_stride_B];
 
       return texture;

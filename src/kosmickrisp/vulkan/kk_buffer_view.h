@@ -24,6 +24,7 @@ struct kk_buffer_view {
    mtl_texture *mtl_texel_buffer_handle;
    uint64_t texel_buffer_gpu_id;
    uint32_t offset_el;
+   uint32_t residency_view;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_buffer_view, vk.base, VkBufferView,

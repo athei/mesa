@@ -203,15 +203,54 @@ src_to_msl(struct nir_to_msl_ctx *ctx, nir_src *src)
       P(ctx, ")");
 }
 
+static bool
+def_is_sparse(nir_def *def)
+{
+   if (nir_def_is_tex(def))
+      return nir_def_as_tex(def)->is_sparse;
+
+   return nir_def_is_intrinsic(def) &&
+          nir_def_as_intrinsic(def)->intrinsic ==
+             nir_intrinsic_bindless_image_sparse_load;
+}
+
+static bool
+alu_src_reads_residency(nir_alu_instr *instr, int srcn)
+{
+   unsigned code = instr->src[srcn].src.ssa->num_components - 1u;
+   bool reads_code = false, reads_value = false;
+   for (int i = 0; i < NIR_MAX_VEC_COMPONENTS; i++) {
+      if (!nir_alu_instr_channel_used(instr, srcn, i))
+         continue;
+      if (instr->src[srcn].swizzle[i] == code)
+         reads_code = true;
+      else
+         reads_value = true;
+   }
+   assert(!(reads_code && reads_value));
+   return reads_code;
+}
+
 static void
 alu_src_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr, int srcn)
 {
    nir_alu_src *src = &instr->src[srcn];
+   bool sparse = def_is_sparse(src->src.ssa);
+   if (sparse && alu_src_reads_residency(instr, srcn)) {
+      const char *bitcast = msl_bitcast_for_src(ctx->types, &src->src);
+      if (bitcast)
+         P(ctx, "as_type<%s>(", bitcast);
+      P(ctx, "t%d_c", src->src.ssa->index);
+      if (bitcast)
+         P(ctx, ")");
+      return;
+   }
+
    src_to_msl(ctx, &src->src);
    if (!nir_alu_has_trivial_src(instr, srcn) &&
        src->src.ssa->num_components > 1) {
-      int num_components = nir_src_num_components(src->src);
-      assert(num_components <= 4);
+      ASSERTED int num_components = nir_src_num_components(src->src);
+      assert(num_components <= 4 || sparse);
 
       P(ctx, ".");
       for (int i = 0; i < NIR_MAX_VEC_COMPONENTS; i++) {
@@ -693,7 +732,8 @@ instrinsic_needs_dest_type(nir_intrinsic_instr *instr)
        /* Atomic swaps have a custom codegen */
        op == nir_intrinsic_global_atomic_swap ||
        op == nir_intrinsic_shared_atomic_swap ||
-       op == nir_intrinsic_bindless_image_atomic_swap)
+       op == nir_intrinsic_bindless_image_atomic_swap ||
+       op == nir_intrinsic_bindless_image_sparse_load)
       return false;
    return info->has_dest;
 }
@@ -1587,6 +1627,26 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ".get_num_mip_levels();\n");
       break;
+   case nir_intrinsic_bindless_image_sparse_load: {
+      unsigned comps = instr->def.num_components - 1u;
+      P_IND(ctx, "{ auto s%d = ", instr->def.index);
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, ".sparse_read(");
+      image_coord_swizzle(ctx, instr);
+      if (nir_intrinsic_image_dim(instr) != GLSL_SAMPLER_DIM_BUF) {
+         P(ctx, ", ");
+         src_to_msl(ctx, &instr->src[3]);
+      }
+      P(ctx, "); t%d = s%d.value()", instr->def.index, instr->def.index);
+      if (comps < 4) {
+         P(ctx, ".");
+         for (uint32_t i = 0u; i < comps; ++i)
+            P(ctx, "%c", "xyzw"[i]);
+      }
+      P(ctx, "; t%d_c = s%d.resident() ? 0u : 1u; }\n", instr->def.index,
+        instr->def.index);
+      break;
+   }
    case nir_intrinsic_bindless_image_load:
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ".read(");
@@ -1782,6 +1842,16 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ";\n");
       break;
+   case nir_intrinsic_is_sparse_texels_resident:
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, " == 0u;\n");
+      break;
+   case nir_intrinsic_sparse_residency_code_and:
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, " | ");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, ";\n");
+      break;
    case nir_intrinsic_load_ro_sink_address_poly:
       /* Point to NULL, not really used currently */
       P(ctx, "0x0;\n");
@@ -1815,7 +1885,12 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
    // Projectors have to be lowered away to regular arithmetic
    assert(!nir_tex_get_src(tex, nir_tex_src_projector));
 
-   P_IND(ctx, "t%d = ", tex->def.index);
+   const char *sp = tex->is_sparse ? "sparse_" : "";
+   if (tex->is_sparse) {
+      P_IND(ctx, "{ auto s%d = ", tex->def.index);
+   } else {
+      P_IND(ctx, "t%d = ", tex->def.index);
+   }
 
    switch (tex->op) {
    case nir_texop_tex:
@@ -1831,9 +1906,9 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
       nir_src *comparator = nir_tex_get_src(tex, nir_tex_src_comparator);
       src_to_msl(ctx, texhandle);
       if (comparator) {
-         P(ctx, ".sample_compare(");
+         P(ctx, ".%ssample_compare(", sp);
       } else {
-         P(ctx, ".sample(");
+         P(ctx, ".%ssample(", sp);
       }
       src_to_msl(ctx, sampler);
       P(ctx, ", ");
@@ -1873,7 +1948,7 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
    }
    case nir_texop_txf: {
       src_to_msl(ctx, texhandle);
-      P(ctx, ".read(");
+      P(ctx, ".%sread(", sp);
       tex_coord_swizzle(ctx, tex);
       nir_src *lod = nir_tex_get_src(tex, nir_tex_src_lod);
       if (lod) {
@@ -1940,9 +2015,9 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
       nir_src *comparator = nir_tex_get_src(tex, nir_tex_src_comparator);
       src_to_msl(ctx, texhandle);
       if (comparator) {
-         P(ctx, ".gather_compare(");
+         P(ctx, ".%sgather_compare(", sp);
       } else {
-         P(ctx, ".gather(");
+         P(ctx, ".%sgather(", sp);
       }
       src_to_msl(ctx, sampler);
       P(ctx, ", ");
@@ -2009,6 +2084,11 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
    }
    default:
       assert(!"Unsupported texture op");
+   }
+
+   if (tex->is_sparse) {
+      P_IND(ctx, "t%d = s%d.value(); t%d_c = s%d.resident() ? 0u : 1u; }\n",
+            tex->def.index, tex->def.index, tex->def.index, tex->def.index);
    }
 }
 
@@ -2438,6 +2518,20 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
          }
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+               unsigned comps = intr->def.num_components - 1u;
+               const char *type =
+                  tex_type_name(nir_intrinsic_dest_type(intr));
+               if (comps > 1) {
+                  P_IND(ctx, "%s%u t%u = %s%u(0);\n", type, comps,
+                        intr->def.index, type, comps);
+               } else {
+                  P_IND(ctx, "%s t%u = %s(0);\n", type, intr->def.index,
+                        type);
+               }
+               P_IND(ctx, "uint t%u_c = 0u;\n", intr->def.index);
+               continue;
+            }
             if (!instrinsic_needs_dest_type(intr))
                continue;
             def = &intr->def;
@@ -2446,6 +2540,18 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
          case nir_instr_type_tex: {
             nir_tex_instr *tex = nir_instr_as_tex(instr);
             def = &tex->def;
+            if (tex->is_sparse) {
+               unsigned comps = def->num_components - 1u;
+               const char *type = tex_type_name(tex->dest_type);
+               if (comps > 1) {
+                  P_IND(ctx, "%s%u t%u = %s%u(0);\n", type, comps, def->index,
+                        type, comps);
+               } else {
+                  P_IND(ctx, "%s t%u = %s(0);\n", type, def->index, type);
+               }
+               P_IND(ctx, "uint t%u_c = 0u;\n", def->index);
+               continue;
+            }
             break;
          }
          default:

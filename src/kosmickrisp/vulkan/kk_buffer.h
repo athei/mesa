@@ -24,10 +24,25 @@ struct kk_buffer {
        * offset calculations through kk_buffer_mtl_offset */
       uint64_t offset;
    } metal;
+
+   struct {
+      uint32_t offset;
+      uint32_t pages;
+      uint32_t tag;
+   } residency;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
+
+static inline uint32_t
+kk_buffer_residency(const struct kk_buffer *buffer, uint64_t offset)
+{
+   if (buffer == NULL || buffer->residency.pages == 0)
+      return 0u;
+
+   return buffer->residency.offset + offset / KK_SPARSE_PAGE_SIZE + 1u;
+}
 
 static inline struct kk_addr_range
 kk_buffer_addr_range(const struct kk_buffer *buffer, uint64_t offset,

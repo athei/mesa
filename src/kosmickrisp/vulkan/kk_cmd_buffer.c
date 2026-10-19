@@ -618,7 +618,13 @@ kk_bind_descriptor_sets(struct kk_descriptor_state *desc,
             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count;
                  j++) {
                struct kk_buffer_address addr = set->dynamic_buffers[j];
-               addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
+               uint64_t offset = info->pDynamicOffsets[next_dyn_offset + j];
+               if (addr.residency) {
+                  addr.residency +=
+                     ((addr.base_addr % KK_SPARSE_PAGE_SIZE) + offset) /
+                     KK_SPARSE_PAGE_SIZE;
+               }
+               addr.base_addr += offset;
                desc->root.dynamic_buffers[dyn_buffer_start + j] = addr;
             }
             next_dyn_offset += set->layout->vk.dynamic_descriptor_count;
@@ -852,7 +858,10 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
    if (unlikely(!root_ptr.gpu))
       return 0u;
 
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
    root->addr = root_ptr.gpu;
+   root->sparse_residency =
+      dev->sparse_residency.bo ? dev->sparse_residency.bo->gpu : 0u;
 
    memcpy(root_ptr.cpu, root, sizeof(*root));
    desc->root_dirty = false;

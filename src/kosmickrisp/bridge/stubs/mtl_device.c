@@ -155,6 +155,13 @@ mtl_sparse_tile_size(mtl_device *device, struct kk_image_layout *layout)
 }
 
 struct mtl_size
+mtl_sparse_page_tile_size(mtl_device *device, enum mtl_texture_type type,
+                          enum mtl_pixel_format format, uint32_t sample_count)
+{
+   return (struct mtl_size){0, 0, 0};
+}
+
+struct mtl_size
 mtl_sparse_tile_count(mtl_device *device, struct kk_image_layout *layout,
                       struct mtl_size tile_size)
 {
@@ -162,6 +169,12 @@ mtl_sparse_tile_count(mtl_device *device, struct kk_image_layout *layout,
 }
 
 /* Resource creation */
+mtl_buffer *
+mtl_new_sparse_buffer(mtl_device *device, uint64_t size_B)
+{
+   return NULL;
+}
+
 mtl_buffer *
 mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
                                   uint64_t size_B)

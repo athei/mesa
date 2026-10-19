@@ -92,6 +92,7 @@ kk_files = files(
   'kk_instance.c',
   'kk_nir_lower_custom_border.c',
   'kk_nir_lower_sampler_minmax.c',
+  'kk_nir_lower_ssbo_residency.c',
   'kk_nir_lower_descriptors.c',
   'kk_nir_lower_image_view_min_lod.c',
   'kk_nir_lower_multiview.c',

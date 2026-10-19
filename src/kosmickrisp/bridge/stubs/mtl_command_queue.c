@@ -65,3 +65,23 @@ void
 mtl_command_queue_signal_drawable(mtl_command_queue *queue, void *drawable)
 {
 }
+
+void
+mtl_command_queue_update_buffer_mappings(
+   mtl_command_queue *queue, mtl_buffer *buffer, mtl_heap *heap,
+   const struct mtl_sparse_buffer_mapping *mappings, uint32_t count)
+{
+}
+
+void
+mtl_command_queue_update_texture_mappings(
+   mtl_command_queue *queue, mtl_texture *texture, mtl_heap *heap,
+   const struct mtl_sparse_texture_mapping *mappings, uint32_t count)
+{
+}
+
+void
+mtl_command_queue_commit_mapping_barrier(mtl_command_queue *queue,
+                                         mtl_device *device)
+{
+}

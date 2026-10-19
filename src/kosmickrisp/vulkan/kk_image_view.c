@@ -190,6 +190,17 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
          view->planes[view_plane].sampled_gpu_resource_id =
             mtl_texture_get_gpu_resource_id(
                view->planes[view_plane].mtl_handle_sampled);
+         view->planes[view_plane].sampled_residency_gpu_resource_id =
+            view->planes[view_plane].sampled_gpu_resource_id;
+
+         if (plane->mtl_handle_residency) {
+            view->planes[view_plane].mtl_handle_sampled_residency =
+               mtl_new_texture_view_with(plane->mtl_handle_residency,
+                                         &view_layout);
+            view->planes[view_plane].sampled_residency_gpu_resource_id =
+               mtl_texture_get_gpu_resource_id(
+                  view->planes[view_plane].mtl_handle_sampled_residency);
+         }
       }
 
       if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
@@ -203,6 +214,17 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
          view->planes[view_plane].storage_gpu_resource_id =
             mtl_texture_get_gpu_resource_id(
                view->planes[view_plane].mtl_handle_storage);
+         view->planes[view_plane].storage_residency_gpu_resource_id =
+            view->planes[view_plane].storage_gpu_resource_id;
+
+         if (plane->mtl_handle_residency) {
+            view->planes[view_plane].mtl_handle_storage_residency =
+               mtl_new_texture_view_with(plane->mtl_handle_residency,
+                                         &view_layout);
+            view->planes[view_plane].storage_residency_gpu_resource_id =
+               mtl_texture_get_gpu_resource_id(
+                  view->planes[view_plane].mtl_handle_storage_residency);
+         }
       }
 
       if (view->vk.usage & (VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
@@ -264,6 +286,12 @@ kk_image_view_finish(struct kk_device *dev, struct kk_image_view *view)
 
       if (view->planes[plane].mtl_handle_storage)
          mtl_release(view->planes[plane].mtl_handle_storage);
+
+      if (view->planes[plane].mtl_handle_sampled_residency)
+         mtl_release(view->planes[plane].mtl_handle_sampled_residency);
+
+      if (view->planes[plane].mtl_handle_storage_residency)
+         mtl_release(view->planes[plane].mtl_handle_storage_residency);
 
       if (view->planes[plane].mtl_handle_input)
          mtl_release(view->planes[plane].mtl_handle_input);

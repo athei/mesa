@@ -342,6 +342,15 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
       set_type(types, &instr->src[0], TYPE_NONE);
       set_type(types, &instr->def, TYPE_NONE);
       break;
+   case nir_intrinsic_is_sparse_texels_resident:
+      set_type(types, &instr->src[0], TYPE_UINT);
+      set_type(types, &instr->def, TYPE_BOOL);
+      break;
+   case nir_intrinsic_sparse_residency_code_and:
+      set_type(types, &instr->src[0], TYPE_UINT);
+      set_type(types, &instr->src[1], TYPE_UINT);
+      set_type(types, &instr->def, TYPE_UINT);
+      break;
    case nir_intrinsic_load_scratch:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_constant:
@@ -423,6 +432,7 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
                ti_type_from_pipe_format(nir_intrinsic_format(instr)));
       break;
    case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_sparse_load:
       set_type(types, &instr->def,
                ti_type_from_nir(nir_intrinsic_dest_type(instr)));
       set_type(types, &instr->src[1], TYPE_UINT); // coords

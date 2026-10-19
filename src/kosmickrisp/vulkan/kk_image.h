@@ -29,8 +29,19 @@ kk_get_image_format_features(struct kk_physical_device *pdevice,
 uint32_t kk_image_max_dimension(const struct kk_physical_device *pdev,
                                 VkImageType image_type);
 
+struct kk_sparse_layout {
+   struct mtl_size tile_px;
+   uint32_t tail_level;
+   uint32_t texture_tail_level;
+   uint32_t residency_tail_level;
+   uint64_t tail_size_B;
+   uint64_t layer_stride_B;
+   uint64_t level_offset_B[KK_MAX_MIP_LEVELS + 1];
+};
+
 struct kk_image_plane {
    struct kk_image_layout layout;
+   struct kk_sparse_layout sparse;
    struct kk_device_memory *mem;
    uint64_t mem_offset_B;
    // TODO_KOSMICKRISP Only have one handle since we will only create 2D arrays
@@ -39,6 +50,7 @@ struct kk_image_plane {
    mtl_texture *mtl_handle;
    /* Metal handle with 2D array type for 3D images */
    mtl_texture *mtl_handle_array;
+   mtl_texture *mtl_handle_residency;
    uint64_t addr;
 };
 
@@ -52,6 +64,8 @@ struct kk_image {
 
    /* Forces alpha value to be one when creating views. Needed for WSI */
    bool wsi_opaque_alpha;
+
+   bool sparse;
 
    uint8_t plane_count;
    struct kk_image_plane planes[3];
@@ -139,5 +153,12 @@ mtl_texture *kk_image_plane_create_texture(struct kk_image_plane *plane,
                                            uint64_t offset_B);
 
 void kk_image_set_label(struct kk_image *image, const char *label);
+
+uint64_t kk_sparse_tail_pages(const struct kk_image_plane *plane,
+                              mtl_texture *texture,
+                              uint32_t texture_tail_level);
+
+struct mtl_size kk_sparse_level_tiles(const struct kk_image_plane *plane,
+                                      uint32_t level);
 
 #endif

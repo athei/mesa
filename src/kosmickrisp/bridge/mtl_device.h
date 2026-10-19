@@ -59,6 +59,10 @@ void mtl_heap_texture_size_and_align_with_descriptor(
    uint64_t *align_B);
 
 uint32_t mtl_sparse_tile_size_in_bytes(mtl_device *device);
+struct mtl_size mtl_sparse_page_tile_size(mtl_device *device,
+                                          enum mtl_texture_type type,
+                                          enum mtl_pixel_format format,
+                                          uint32_t sample_count);
 struct mtl_size mtl_sparse_tile_size(mtl_device *device,
                                      struct kk_image_layout *layout);
 struct mtl_size mtl_sparse_tile_count(mtl_device *device,
@@ -66,6 +70,7 @@ struct mtl_size mtl_sparse_tile_count(mtl_device *device,
                                       struct mtl_size tile_size);
 
 /* Resource creation */
+mtl_buffer *mtl_new_sparse_buffer(mtl_device *device, uint64_t size_B);
 mtl_buffer *mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
                                               uint64_t size_B);
 mtl_command_allocator *mtl_new_command_allocator(mtl_device *device);

@@ -173,6 +173,7 @@ enum kk_feature_key {
    KK_FEAT_NULL_DESCRIPTOR = BITFIELD_BIT(1),
    KK_FEAT_IMAGE_VIEW_MIN_LOD = BITFIELD_BIT(2),
    KK_FEAT_SAMPLER_MINMAX = BITFIELD_BIT(3),
+   KK_FEAT_SPARSE_RESIDENCY = BITFIELD_BIT(4),
 };
 
 static enum kk_feature_key
@@ -182,6 +183,8 @@ kk_make_feature_key(const struct kk_physical_device *pdev,
    enum kk_feature_key key = 0;
    if (feats->samplerFilterMinmax && !kk_has_native_sampler_minmax(pdev))
       key |= KK_FEAT_SAMPLER_MINMAX;
+   if (feats->sparseResidencyBuffer)
+      key |= KK_FEAT_SPARSE_RESIDENCY;
    if (feats->customBorderColors)
       key |= KK_FEAT_CUSTOM_BORDER;
    if (feats->nullDescriptor)
@@ -743,6 +746,9 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
+   NIR_PASS(_, nir, kk_nir_lower_ssbo_residency,
+            kk_buffer_addr_format(rs->storage_buffers),
+            features & KK_FEAT_SPARSE_RESIDENCY);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
             kk_buffer_addr_format(rs->storage_buffers));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
@@ -812,7 +818,7 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
     * the lower descriptor pass
     */
    NIR_PASS(_, nir, kk_nir_lower_descriptors, rs, set_layout_count,
-            set_layouts);
+            set_layouts, features & KK_FEAT_SPARSE_RESIDENCY);
 
    /* KK_WORKAROUND_16 - must be called after kk_nir_lower_descriptors(), which
     * lowers all image intrinsics to be bindless */
@@ -1255,7 +1261,8 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
       msl_nir_lower_clip_cull_distance(nir, 0);
       /* Descriptors were lowered with the GS, this lowers the system values
        * the hardware vertex lowering added */
-      NIR_PASS(_, nir, kk_nir_lower_descriptors, robustness, 0, NULL);
+      NIR_PASS(_, nir, kk_nir_lower_descriptors, robustness, 0, NULL,
+               false);
    }
 
    if (stage == MESA_SHADER_FRAGMENT) {

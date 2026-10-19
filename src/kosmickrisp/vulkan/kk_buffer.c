@@ -46,6 +46,51 @@ kk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    if (!buffer)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
+      uint64_t size_B = align64(buffer->vk.size, KK_SPARSE_PAGE_SIZE);
+      buffer->metal.handle = mtl_new_sparse_buffer(dev->mtl_handle, size_B);
+      if (buffer->metal.handle == NULL) {
+         vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+
+      buffer->metal.offset = 0u;
+      buffer->vk.device_address =
+         mtl_buffer_get_gpu_address(buffer->metal.handle);
+      kk_device_add_buffer_to_residency_set(dev, buffer->metal.handle);
+
+      if ((buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT) &&
+          dev->sparse_residency.bo) {
+         assert(buffer->vk.device_address % KK_SPARSE_PAGE_SIZE == 0);
+         uint32_t pages = size_B / KK_SPARSE_PAGE_SIZE;
+
+         simple_mtx_lock(&dev->sparse_residency.lock);
+         uint64_t offset =
+            util_vma_heap_alloc(&dev->sparse_residency.heap, pages, 1u);
+         uint32_t tag = util_idalloc_alloc(&dev->sparse_residency.tags);
+         if (offset == 0u || tag >= KK_SPARSE_RESIDENCY_TAGS) {
+            if (offset)
+               util_vma_heap_free(&dev->sparse_residency.heap, offset, pages);
+            util_idalloc_free(&dev->sparse_residency.tags, tag);
+            simple_mtx_unlock(&dev->sparse_residency.lock);
+            kk_DestroyBuffer(device, kk_buffer_to_handle(buffer), pAllocator);
+            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         }
+         simple_mtx_unlock(&dev->sparse_residency.lock);
+
+         void *map = dev->sparse_residency.bo->cpu;
+         memset(map + offset, 0, pages);
+         uint64_t *entry = map + KK_SPARSE_TAG_TABLE_OFFSET + tag * 16;
+         entry[0] = buffer->vk.device_address;
+         entry[1] = offset + 1u;
+
+         buffer->residency.offset = offset;
+         buffer->residency.pages = pages;
+         buffer->residency.tag = tag;
+         kk_device_count_sparse_residency(dev, 1);
+      }
+   }
+
    *pBuffer = kk_buffer_to_handle(buffer);
 
    return VK_SUCCESS;
@@ -61,6 +106,19 @@ kk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
    if (!buffer)
       return;
 
+   if (buffer->metal.handle &&
+       (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT))
+      kk_device_remove_buffer_from_residency_set(dev, buffer->metal.handle);
+
+   if (buffer->residency.pages) {
+      simple_mtx_lock(&dev->sparse_residency.lock);
+      util_vma_heap_free(&dev->sparse_residency.heap, buffer->residency.offset,
+                         buffer->residency.pages);
+      util_idalloc_free(&dev->sparse_residency.tags, buffer->residency.tag);
+      simple_mtx_unlock(&dev->sparse_residency.lock);
+      kk_device_count_sparse_residency(dev, -1);
+   }
+
    if (buffer->metal.handle)
       mtl_release(buffer->metal.handle);
 
@@ -75,9 +133,11 @@ kk_GetDeviceBufferMemoryRequirements(
    VK_FROM_HANDLE(kk_device, dev, device);
    struct kk_physical_device *pdev = kk_device_physical(dev);
 
-   const uint64_t alignment = kk_get_buffer_alignment(
+   uint64_t alignment = kk_get_buffer_alignment(
       pdev, pInfo->pCreateInfo->size, pInfo->pCreateInfo->usage,
       pInfo->pCreateInfo->flags);
+   if (pInfo->pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      alignment = MAX2(alignment, KK_SPARSE_PAGE_SIZE);
 
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
       .size = align64(pInfo->pCreateInfo->size, alignment),
@@ -207,7 +267,8 @@ kk_GetBufferDeviceAddress(UNUSED VkDevice device,
 {
    VK_FROM_HANDLE(kk_buffer, buffer, pInfo->buffer);
 
-   return vk_buffer_address(&buffer->vk, 0);
+   return vk_buffer_address(&buffer->vk, 0) |
+          ((uint64_t)buffer->residency.tag << KK_SPARSE_TAG_SHIFT);
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL

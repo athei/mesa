@@ -330,6 +330,22 @@ mtl_sparse_tile_size(mtl_device *device, struct kk_image_layout *layout) {
 }
 
 struct mtl_size
+mtl_sparse_page_tile_size(mtl_device *device, enum mtl_texture_type type,
+                          enum mtl_pixel_format format, uint32_t sample_count)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      MTLSize tile_size =
+         [dev sparseTileSizeWithTextureType:(MTLTextureType)type
+                                pixelFormat:(MTLPixelFormat)format
+                                sampleCount:sample_count
+                             sparsePageSize:MTLSparsePageSize64];
+      return (struct mtl_size){tile_size.width, tile_size.height,
+                               tile_size.depth};
+   }
+}
+
+struct mtl_size
 mtl_sparse_tile_count(mtl_device *device, struct kk_image_layout *layout,
                       struct mtl_size tile_size) {
    @autoreleasepool {
@@ -349,6 +365,18 @@ mtl_sparse_tile_count(mtl_device *device, struct kk_image_layout *layout,
 }
 
 /* Resource creation */
+mtl_buffer *
+mtl_new_sparse_buffer(mtl_device *device, uint64_t size_B)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      return [dev newBufferWithLength:size_B
+                              options:MTLResourceStorageModePrivate |
+                                      MTLResourceHazardTrackingModeUntracked
+              placementSparsePageSize:MTLSparsePageSize64];
+   }
+}
+
 mtl_buffer *
 mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void* ptr,
                                   uint64_t size_B)

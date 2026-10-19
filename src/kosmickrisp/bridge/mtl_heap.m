@@ -24,6 +24,8 @@ mtl_new_heap(mtl_device *device, uint64_t size,
       descriptor.resourceOptions = (MTLResourceOptions)resource_options;
       descriptor.size = size;
       descriptor.sparsePageSize = MTLSparsePageSize16;
+      if (size >= KK_SPARSE_PAGE_SIZE)
+         descriptor.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
       return [dev newHeapWithDescriptor:descriptor];
    }
 }
@@ -56,6 +58,20 @@ mtl_new_texture_descriptor(const struct kk_image_layout *layout)
       /* We don't set the swizzle because Metal complains when the usage has store or render target with swizzle... */
       
       return descriptor;
+   }
+}
+
+mtl_texture *
+mtl_new_sparse_texture(mtl_device *device, const struct kk_image_layout *layout)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      MTLTextureDescriptor *descriptor =
+         [mtl_new_texture_descriptor(layout) autorelease];
+      descriptor.resourceOptions = MTLResourceStorageModePrivate |
+                                   MTLResourceHazardTrackingModeUntracked;
+      descriptor.placementSparsePageSize = MTLSparsePageSize64;
+      return [dev newTextureWithDescriptor:descriptor];
    }
 }
 

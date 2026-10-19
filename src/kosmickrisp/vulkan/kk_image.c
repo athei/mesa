@@ -6,6 +6,7 @@
  */
 
 #include "kk_image.h"
+#include "kk_debug.h"
 
 #include "kk_device.h"
 #include "kk_device_memory.h"
@@ -255,6 +256,54 @@ kk_image_max_dimension(const struct kk_physical_device *pdev,
    }
 }
 
+static bool
+kk_sparse_tile_px(struct kk_physical_device *pdev, VkFormat format,
+                  VkImageType type, VkSampleCountFlagBits samples,
+                  VkImageTiling tiling, bool residency,
+                  struct mtl_size *tile_px)
+{
+   if (tiling != VK_IMAGE_TILING_OPTIMAL ||
+       vk_format_is_compressed(format) ||
+       vk_format_get_plane_count(format) > 1 ||
+       !(pdev->info.supported_sample_counts & samples))
+      return false;
+
+   if (type == VK_IMAGE_TYPE_3D ||
+       (residency &&
+        (type != VK_IMAGE_TYPE_2D || samples != VK_SAMPLE_COUNT_1_BIT ||
+         vk_format_is_depth_or_stencil(format))))
+      return false;
+
+   enum mtl_texture_type mtl_type =
+      samples > 1 ? MTL_TEXTURE_TYPE_2D_MULTISAMPLE : MTL_TEXTURE_TYPE_2D;
+
+   const struct kk_va_format *va_format =
+      kk_get_va_format(vk_format_to_pipe_format(format));
+   if (va_format == NULL)
+      return false;
+
+   *tile_px = mtl_sparse_page_tile_size(pdev->mtl_dev_handle, mtl_type,
+                                        va_format->mtl_pixel_format, samples);
+   return tile_px->x > 0 && tile_px->y > 0;
+}
+
+static bool
+kk_sparse_tile_is_standard(VkFormat format, struct mtl_size tile_px)
+{
+   static const struct mtl_size standard_blocks[] = {
+      [1] = {256, 256, 1}, [2] = {256, 128, 1}, [4] = {128, 128, 1},
+      [8] = {128, 64, 1},  [16] = {64, 64, 1},
+   };
+   uint32_t block_B = vk_format_get_blocksize(format);
+   if (block_B >= ARRAY_SIZE(standard_blocks) || !standard_blocks[block_B].x)
+      return false;
+
+   return tile_px.x ==
+             standard_blocks[block_B].x * vk_format_get_blockwidth(format) &&
+          tile_px.y ==
+             standard_blocks[block_B].y * vk_format_get_blockheight(format);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 kk_GetPhysicalDeviceImageFormatProperties2(
    VkPhysicalDevice physicalDevice,
@@ -331,8 +380,14 @@ kk_GetPhysicalDeviceImageFormatProperties2(
    if (ycbcr_info && pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* Don't support sparse residency */
-   if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+   struct mtl_size sparse_tile_px;
+   if ((pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)) &&
+       !kk_sparse_tile_px(
+          pdev, pImageFormatInfo->format, pImageFormatInfo->type,
+          VK_SAMPLE_COUNT_1_BIT, pImageFormatInfo->tiling,
+          pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT,
+          &sparse_tile_px))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* From the Vulkan 1.3.279 spec:
@@ -503,6 +558,18 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   if (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+      sampleCounts &= VK_SAMPLE_COUNT_1_BIT;
+   } else if (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      u_foreach_bit(s, sampleCounts) {
+         struct mtl_size tile;
+         if (!kk_sparse_tile_px(pdev, pImageFormatInfo->format,
+                                pImageFormatInfo->type, 1u << s,
+                                pImageFormatInfo->tiling, false, &tile))
+            sampleCounts &= ~(1u << s);
+      }
+   }
+
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
       .maxExtent = maxExtent,
       .maxMipLevels = maxMipLevels,
@@ -563,8 +630,109 @@ kk_GetPhysicalDeviceSparseImageFormatProperties2(
    const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
    uint32_t *pPropertyCount, VkSparseImageFormatProperties2 *pProperties)
 {
-   *pPropertyCount = 0;
-   return;
+   VK_FROM_HANDLE(kk_physical_device, pdev, physicalDevice);
+   VK_OUTARRAY_MAKE_TYPED(VkSparseImageFormatProperties2, out, pProperties,
+                          pPropertyCount);
+
+   struct mtl_size tile_px;
+   if (!kk_sparse_tile_px(pdev, pFormatInfo->format, pFormatInfo->type,
+                          pFormatInfo->samples, pFormatInfo->tiling, true,
+                          &tile_px))
+      return;
+
+   vk_outarray_append_typed(VkSparseImageFormatProperties2, &out, props)
+   {
+      props->properties = (VkSparseImageFormatProperties){
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .imageGranularity = {tile_px.x, tile_px.y, tile_px.z},
+         .flags = kk_sparse_tile_is_standard(pFormatInfo->format, tile_px)
+                     ? 0
+                     : VK_SPARSE_IMAGE_FORMAT_NONSTANDARD_BLOCK_SIZE_BIT,
+      };
+   }
+}
+
+struct mtl_size
+kk_sparse_level_tiles(const struct kk_image_plane *plane, uint32_t level)
+{
+   const struct kk_image_layout *layout = &plane->layout;
+   const struct mtl_size tile = plane->sparse.tile_px;
+   return (struct mtl_size){
+      DIV_ROUND_UP(u_minify(layout->width_px, level), tile.x),
+      DIV_ROUND_UP(u_minify(layout->height_px, level), tile.y),
+      DIV_ROUND_UP(u_minify(layout->depth_px, level), tile.z),
+   };
+}
+
+uint64_t
+kk_sparse_tail_pages(const struct kk_image_plane *plane, mtl_texture *texture,
+                     uint32_t texture_tail_level)
+{
+   uint64_t pages = 0u;
+   for (uint32_t level = plane->sparse.tail_level; level < texture_tail_level;
+        level++) {
+      struct mtl_size tiles = kk_sparse_level_tiles(plane, level);
+      pages += tiles.x * tiles.y * tiles.z;
+   }
+   if (texture_tail_level < plane->layout.levels)
+      pages += DIV_ROUND_UP(mtl_texture_get_tail_size(texture),
+                            KK_SPARSE_PAGE_SIZE);
+   return pages;
+}
+
+static VkResult
+kk_image_sparse_init(struct kk_device *dev, struct kk_image *image)
+{
+   struct kk_image_plane *plane = &image->planes[0];
+   struct kk_image_layout *layout = &plane->layout;
+   struct kk_sparse_layout *sparse = &plane->sparse;
+
+   if (!(image->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT))
+      layout->usage &=
+         ~(MTL_TEXTURE_USAGE_SHADER_WRITE | MTL_TEXTURE_USAGE_SHADER_ATOMIC);
+
+   plane->mtl_handle = mtl_new_sparse_texture(dev->mtl_handle, layout);
+   if (plane->mtl_handle == NULL)
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   sparse->tile_px = mtl_sparse_page_tile_size(
+      dev->mtl_handle, layout->type, layout->format.mtl,
+      layout->sample_count_sa);
+   sparse->texture_tail_level =
+      MIN2(mtl_texture_first_mipmap_in_tail(plane->mtl_handle),
+           layout->levels);
+   sparse->residency_tail_level = sparse->texture_tail_level;
+
+   if (layout->usage & MTL_TEXTURE_USAGE_SHADER_WRITE) {
+      struct kk_image_layout residency_layout = *layout;
+      residency_layout.usage &= MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW;
+      residency_layout.usage |= MTL_TEXTURE_USAGE_SHADER_READ;
+      plane->mtl_handle_residency =
+         mtl_new_sparse_texture(dev->mtl_handle, &residency_layout);
+      if (plane->mtl_handle_residency == NULL)
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      sparse->residency_tail_level =
+         MIN2(mtl_texture_first_mipmap_in_tail(plane->mtl_handle_residency),
+              layout->levels);
+   }
+
+   sparse->tail_level =
+      MIN2(sparse->texture_tail_level, sparse->residency_tail_level);
+   sparse->tail_size_B =
+      kk_sparse_tail_pages(plane, plane->mtl_handle,
+                           sparse->texture_tail_level) *
+      (uint64_t)KK_SPARSE_PAGE_SIZE;
+
+   uint64_t offset_B = 0u;
+   for (uint32_t level = 0; level < sparse->tail_level; level++) {
+      struct mtl_size tiles = kk_sparse_level_tiles(plane, level);
+      sparse->level_offset_B[level] = offset_B;
+      offset_B += tiles.x * tiles.y * tiles.z * KK_SPARSE_PAGE_SIZE;
+   }
+   sparse->level_offset_B[sparse->tail_level] = offset_B;
+   sparse->layer_stride_B = offset_B + sparse->tail_size_B;
+
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -610,6 +778,11 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
                            &image->planes[plane].layout);
    }
 
+   if (pCreateInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      image->sparse = true;
+      return kk_image_sparse_init(dev, image);
+   }
+
    return VK_SUCCESS;
 }
 
@@ -631,6 +804,8 @@ kk_image_plane_finish(struct kk_device *dev, struct kk_image_plane *plane,
       mtl_release(plane->mtl_handle);
    if (plane->mtl_handle_array != NULL)
       mtl_release(plane->mtl_handle_array);
+   if (plane->mtl_handle_residency != NULL)
+      mtl_release(plane->mtl_handle_residency);
 }
 
 static void
@@ -665,8 +840,19 @@ kk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
 
    result = kk_image_init(dev, image, pCreateInfo);
    if (result != VK_SUCCESS) {
+      kk_image_finish(dev, image, pAllocator);
       vk_free2(&dev->vk.alloc, pAllocator, image);
       return result;
+   }
+
+   if (image->sparse) {
+      kk_device_add_buffer_to_residency_set(dev, image->planes[0].mtl_handle);
+      if (image->planes[0].mtl_handle_residency)
+         kk_device_add_buffer_to_residency_set(
+            dev, image->planes[0].mtl_handle_residency);
+      if (image->vk.base.object_name)
+         mtl_resource_set_label(image->planes[0].mtl_handle,
+                                image->vk.base.object_name);
    }
 
    *pImage = kk_image_to_handle(image);
@@ -683,6 +869,13 @@ kk_DestroyImage(VkDevice device, VkImage _image,
 
    if (!image)
       return;
+
+   if (image->sparse && image->planes[0].mtl_handle)
+      kk_device_remove_buffer_from_residency_set(dev,
+                                                 image->planes[0].mtl_handle);
+   if (image->sparse && image->planes[0].mtl_handle_residency)
+      kk_device_remove_buffer_from_residency_set(
+         dev, image->planes[0].mtl_handle_residency);
 
    kk_image_finish(dev, image, pAllocator);
    vk_free2(&dev->vk.alloc, pAllocator, image);
@@ -735,6 +928,12 @@ kk_get_image_memory_requirements(struct kk_device *dev, struct kk_image *image,
          kk_image_plane_add_req(dev, image, &image->planes[plane], &size_B,
                                 &align_B);
       }
+   }
+
+   if (image->sparse) {
+      const struct kk_image_plane *plane = &image->planes[0];
+      align_B = KK_SPARSE_PAGE_SIZE;
+      size_B = plane->sparse.layer_stride_B * plane->layout.layers;
    }
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits = memory_types;
@@ -794,13 +993,55 @@ kk_GetDeviceImageMemoryRequirements(VkDevice device,
    kk_image_finish(dev, &image, NULL);
 }
 
+static void
+kk_get_image_sparse_memory_requirements(
+   struct kk_device *dev, struct kk_image *image,
+   uint32_t *pSparseMemoryRequirementCount,
+   VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
+{
+   VK_OUTARRAY_MAKE_TYPED(VkSparseImageMemoryRequirements2, out,
+                          pSparseMemoryRequirements,
+                          pSparseMemoryRequirementCount);
+
+   if (!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+      return;
+
+   const struct kk_image_plane *plane = &image->planes[0];
+   const struct kk_sparse_layout *sparse = &plane->sparse;
+
+   vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, reqs)
+   {
+      reqs->memoryRequirements = (VkSparseImageMemoryRequirements){
+         .formatProperties =
+            {
+               .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+               .imageGranularity = {sparse->tile_px.x, sparse->tile_px.y,
+                                    sparse->tile_px.z},
+               .flags = kk_sparse_tile_is_standard(image->vk.format,
+                                                   sparse->tile_px)
+                           ? 0
+                           : VK_SPARSE_IMAGE_FORMAT_NONSTANDARD_BLOCK_SIZE_BIT,
+            },
+         .imageMipTailFirstLod = sparse->tail_level,
+         .imageMipTailSize = sparse->tail_size_B,
+         .imageMipTailOffset = sparse->level_offset_B[sparse->tail_level],
+         .imageMipTailStride = sparse->layer_stride_B,
+      };
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 kk_GetImageSparseMemoryRequirements2(
    VkDevice device, const VkImageSparseMemoryRequirementsInfo2 *pInfo,
    uint32_t *pSparseMemoryRequirementCount,
    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   *pSparseMemoryRequirementCount = 0u;
+   VK_FROM_HANDLE(kk_device, dev, device);
+   VK_FROM_HANDLE(kk_image, image, pInfo->image);
+
+   kk_get_image_sparse_memory_requirements(dev, image,
+                                           pSparseMemoryRequirementCount,
+                                           pSparseMemoryRequirements);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -809,7 +1050,18 @@ kk_GetDeviceImageSparseMemoryRequirements(
    uint32_t *pSparseMemoryRequirementCount,
    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   *pSparseMemoryRequirementCount = 0u;
+   VK_FROM_HANDLE(kk_device, dev, device);
+   struct kk_image image = {0};
+
+   if (kk_image_init(dev, &image, pInfo->pCreateInfo) == VK_SUCCESS) {
+      kk_get_image_sparse_memory_requirements(dev, &image,
+                                              pSparseMemoryRequirementCount,
+                                              pSparseMemoryRequirements);
+   } else {
+      *pSparseMemoryRequirementCount = 0u;
+   }
+
+   kk_image_finish(dev, &image, NULL);
 }
 
 static void

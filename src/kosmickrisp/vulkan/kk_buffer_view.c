@@ -116,6 +116,29 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    view->texel_buffer_gpu_id =
       mtl_texture_get_gpu_resource_id(view->mtl_texel_buffer_handle);
 
+   if (buffer->residency.pages) {
+      simple_mtx_lock(&dev->sparse_residency.lock);
+      uint32_t id = util_idalloc_alloc(&dev->sparse_residency.views);
+      if (id >= KK_SPARSE_RESIDENCY_VIEWS) {
+         util_idalloc_free(&dev->sparse_residency.views, id);
+         id = 0u;
+      }
+      simple_mtx_unlock(&dev->sparse_residency.lock);
+
+      if (id == 0u) {
+         kk_DestroyBufferView(_device, kk_buffer_view_to_handle(view),
+                              pAllocator);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+
+      uint64_t entry =
+         (uint64_t)kk_buffer_residency(buffer, view->vk.offset) |
+         ((view->vk.offset % KK_SPARSE_PAGE_SIZE) << 32) |
+         ((uint64_t)el_size_B << 48);
+      ((uint64_t *)dev->sparse_residency.bo->cpu)[id] = entry;
+      view->residency_view = id;
+   }
+
    *pBufferView = kk_buffer_view_to_handle(view);
 
    return VK_SUCCESS;
@@ -130,6 +153,12 @@ kk_DestroyBufferView(VkDevice _device, VkBufferView bufferView,
 
    if (!view)
       return;
+
+   if (view->residency_view) {
+      simple_mtx_lock(&dev->sparse_residency.lock);
+      util_idalloc_free(&dev->sparse_residency.views, view->residency_view);
+      simple_mtx_unlock(&dev->sparse_residency.lock);
+   }
 
    mtl_release(view->mtl_texel_buffer_handle);
    vk_buffer_view_destroy(&dev->vk, pAllocator, &view->vk);
