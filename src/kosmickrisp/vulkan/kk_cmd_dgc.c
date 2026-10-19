@@ -146,7 +146,7 @@ kk_dgc_prepare(struct kk_cmd_buffer *cmd,
                struct libkk_dgc_params *params, struct kk_dgc_buffers *bufs)
 {
    const struct vk_indirect_command_layout *vk = &layout->vk;
-   uint64_t base = info->preprocessAddress;
+   uint64_t base = info->preprocessAddress & KK_SPARSE_ADDRESS_MASK;
    uint64_t size = kk_dgc_layout_buffers(vk, info->maxSequenceCount, bufs);
 
    if (!base || info->preprocessSize < size)
@@ -165,8 +165,8 @@ kk_dgc_prepare(struct kk_cmd_buffer *cmd,
    bool dispatch = vk->dgc_info & BITFIELD_BIT(MESA_VK_DGC_DISPATCH);
 
    *params = (struct libkk_dgc_params){
-      .stream = info->indirectAddress,
-      .count = info->sequenceCountAddress,
+      .stream = info->indirectAddress & KK_SPARSE_ADDRESS_MASK,
+      .count = info->sequenceCountAddress & KK_SPARSE_ADDRESS_MASK,
       .predicate =
          cmd->state.cond_render.enabled ? cmd->state.cond_render.address : 0,
       .roots = bufs->roots,

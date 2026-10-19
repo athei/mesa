@@ -71,10 +71,14 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
             assert(view->planes[plane].input_gpu_resource_id);
             desc[plane].image_gpu_resource_id =
                view->planes[plane].input_gpu_resource_id;
+            desc[plane].residency_gpu_resource_id =
+               view->planes[plane].input_gpu_resource_id;
          } else {
             assert(view->planes[plane].sampled_gpu_resource_id);
             desc[plane].image_gpu_resource_id =
                view->planes[plane].sampled_gpu_resource_id;
+            desc[plane].residency_gpu_resource_id =
+               view->planes[plane].sampled_residency_gpu_resource_id;
          }
 
          float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
@@ -168,6 +172,8 @@ get_storage_image_view_desc(
 
       assert(view->planes[plane].storage_gpu_resource_id);
       desc.image_gpu_resource_id = view->planes[plane].storage_gpu_resource_id;
+      desc.residency_gpu_resource_id =
+         view->planes[plane].storage_residency_gpu_resource_id;
    }
 
    assert(sizeof(desc) <= dst_size);
@@ -200,6 +206,7 @@ write_buffer_desc(struct kk_descriptor_set *set,
    const struct kk_buffer_address desc = {
       .base_addr = addr_range.addr,
       .size = addr_range.range,
+      .residency = kk_buffer_residency(buffer, info->offset),
    };
    write_desc(set, binding, elem, &desc, sizeof(desc));
 }
@@ -222,6 +229,7 @@ write_dynamic_buffer_desc(struct kk_descriptor_set *set,
    *desc = (struct kk_buffer_address){
       .base_addr = addr_range.addr,
       .size = addr_range.range,
+      .residency = kk_buffer_residency(buffer, info->offset),
    };
 }
 
@@ -238,7 +246,10 @@ write_buffer_view_desc(struct kk_descriptor_set *set,
       assert(view->texel_buffer_gpu_id);
 
       desc.image_gpu_resource_id = view->texel_buffer_gpu_id;
-      desc.buffer_offset_el = view->offset_el;
+      desc.residency_gpu_resource_id = view->texel_buffer_gpu_id;
+      desc.buffer_offset_el =
+         view->offset_el |
+         (view->residency_view << KK_TEXEL_BUFFER_VIEW_SHIFT);
       desc.buffer_size_el = view->vk.elements;
    }
    write_desc(set, binding, elem, &desc, sizeof(desc));

@@ -26,6 +26,8 @@ mtl_buffer *mtl_new_buffer_with_length(mtl_heap *heap, uint64_t size_B,
                                        uint64_t offset_B);
 mtl_texture *mtl_new_texture_with_descriptor(
    mtl_heap *heap, const struct kk_image_layout *layout, uint64_t offset);
+mtl_texture *mtl_new_sparse_texture(mtl_device *device,
+                                    const struct kk_image_layout *layout);
 
 void mtl_heap_set_label(mtl_heap *heap, const char *label);
 void mtl_resource_set_label(mtl_resource *resource, const char *label);

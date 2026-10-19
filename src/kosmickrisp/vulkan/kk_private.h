@@ -22,6 +22,16 @@
 #define KK_MAX_SAMPLES                   8
 #define KK_MIN_SSBO_ALIGNMENT            16
 #define KK_MIN_TEXEL_BUFFER_ALIGNMENT    16
+#define KK_TEXEL_BUFFER_VIEW_SHIFT      16
+#define KK_TEXEL_BUFFER_OFFSET_MASK     BITFIELD_MASK(KK_TEXEL_BUFFER_VIEW_SHIFT)
+#define KK_SPARSE_RESIDENCY_VIEWS       BITFIELD_BIT(16)
+#define KK_SPARSE_RESIDENCY_TAGS        BITFIELD_BIT(12)
+#define KK_SPARSE_TAG_SHIFT             48
+#define KK_SPARSE_ADDRESS_MASK          BITFIELD64_MASK(KK_SPARSE_TAG_SHIFT)
+#define KK_SPARSE_TAG_TABLE_OFFSET                                             \
+   (KK_SPARSE_RESIDENCY_VIEWS * sizeof(uint64_t))
+#define KK_SPARSE_RESIDENCY_HEADER_SIZE                                        \
+   (KK_SPARSE_TAG_TABLE_OFFSET + KK_SPARSE_RESIDENCY_TAGS * 2 * sizeof(uint64_t))
 #define KK_MIN_UBO_ALIGNMENT             64
 #define KK_MAX_VIEWPORTS                 16
 #define KK_MAX_XFB_BUFFERS               4
@@ -45,6 +55,7 @@
 #define KK_MAX_SAMPLE_LOCATION         (0.9375f)
 
 #define KK_SPARSE_ADDR_SPACE_SIZE (1ull << 39)
+#define KK_SPARSE_PAGE_SIZE       65536u
 
 /* Max size of a bound cbuf */
 #define KK_MAX_CBUF_SIZE (1u << 16)

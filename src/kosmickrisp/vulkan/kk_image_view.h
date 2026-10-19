@@ -44,8 +44,13 @@ struct kk_image_view {
       /* Used if view has to create its own alias of a specific subresource */
       mtl_texture *mtl_handle_subres;
 
+      mtl_texture *mtl_handle_sampled_residency;
+      mtl_texture *mtl_handle_storage_residency;
+
       uint64_t sampled_gpu_resource_id;
       uint64_t storage_gpu_resource_id;
+      uint64_t sampled_residency_gpu_resource_id;
+      uint64_t storage_residency_gpu_resource_id;
       uint64_t input_gpu_resource_id;
    } planes[3];
 };

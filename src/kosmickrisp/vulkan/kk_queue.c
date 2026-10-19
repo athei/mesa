@@ -9,6 +9,9 @@
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
 #include "kk_device.h"
+#include "kk_device_memory.h"
+#include "kk_image.h"
+#include "kk_bo.h"
 #include "kk_entrypoints.h"
 #include "kk_physical_device.h"
 #include "kk_sync.h"
@@ -172,6 +175,258 @@ unlock:
    return result;
 }
 
+static void
+kk_queue_bind_buffer(struct kk_queue *queue, struct kk_buffer *buffer,
+                     const VkSparseMemoryBind *bind,
+                     struct util_dynarray *fills)
+{
+   VK_FROM_HANDLE(kk_device_memory, mem, bind->memory);
+
+   struct mtl_sparse_buffer_mapping mapping = {
+      .first_page = bind->resourceOffset / KK_SPARSE_PAGE_SIZE,
+      .page_count = DIV_ROUND_UP(bind->size, KK_SPARSE_PAGE_SIZE),
+      .heap_page = mem ? bind->memoryOffset / KK_SPARSE_PAGE_SIZE : 0u,
+      .map = mem != NULL,
+   };
+   mtl_command_queue_update_buffer_mappings(
+      queue->mtl_handle, buffer->metal.handle,
+      mem ? mem->bo->mtl_handle : NULL, &mapping, 1u);
+
+   if (buffer->residency.pages) {
+      struct mtl_buffer_fill fill = {
+         .offset = buffer->residency.offset + mapping.first_page,
+         .size = mapping.page_count,
+         .value = mapping.map,
+      };
+      util_dynarray_append(fills, fill);
+   }
+}
+
+struct kk_texture_mapping {
+   mtl_texture *texture;
+   mtl_heap *heap;
+   struct mtl_sparse_texture_mapping mapping;
+};
+
+static void
+kk_queue_map_texture(struct kk_queue *queue, struct util_dynarray *deferred,
+                     mtl_texture *texture, struct kk_device_memory *mem,
+                     struct mtl_sparse_texture_mapping mapping)
+{
+   mapping.map = mem != NULL;
+   if (!mapping.map)
+      mapping.heap_page = 0u;
+
+   struct kk_texture_mapping op = {
+      .texture = texture,
+      .heap = mem ? mem->bo->mtl_handle : NULL,
+      .mapping = mapping,
+   };
+
+   if (deferred) {
+      util_dynarray_append(deferred, op);
+      return;
+   }
+
+   mtl_command_queue_update_texture_mappings(queue->mtl_handle, op.texture,
+                                             op.heap, &op.mapping, 1u);
+}
+
+static struct util_dynarray *
+kk_plane_deferred(struct kk_image_plane *plane, struct util_dynarray *deferred)
+{
+   return plane->mtl_handle_residency ? NULL : deferred;
+}
+
+static void
+kk_queue_map_tail_page(struct kk_queue *queue, struct util_dynarray *deferred,
+                       struct kk_image_plane *plane, mtl_texture *texture,
+                       uint32_t texture_tail_level,
+                       uint32_t layer, uint64_t page,
+                       struct kk_device_memory *mem, uint64_t heap_page)
+{
+   struct mtl_sparse_texture_mapping mapping = {
+      .size = {1, 1, 1},
+      .slice = layer,
+      .heap_page = heap_page,
+   };
+
+   for (uint32_t level = plane->sparse.tail_level; level < texture_tail_level;
+        level++) {
+      struct mtl_size tiles = kk_sparse_level_tiles(plane, level);
+      uint64_t count = tiles.x * tiles.y * tiles.z;
+      if (page < count) {
+         mapping.level = level;
+         mapping.origin = (struct mtl_size){
+            page % tiles.x, (page / tiles.x) % tiles.y,
+            page / (tiles.x * tiles.y)};
+         kk_queue_map_texture(queue, deferred, texture, mem, mapping);
+         return;
+      }
+      page -= count;
+   }
+
+   if (texture_tail_level >= plane->layout.levels)
+      return;
+
+   mapping.level = texture_tail_level;
+   mapping.origin = (struct mtl_size){page, 0, 0};
+   kk_queue_map_texture(queue, deferred, texture, mem, mapping);
+}
+
+static void
+kk_queue_bind_image_tail(struct kk_queue *queue, struct util_dynarray *deferred,
+                         struct kk_image_plane *plane, uint32_t layer, uint64_t page, uint64_t count,
+                         struct kk_device_memory *mem, uint64_t heap_page)
+{
+   const struct kk_sparse_layout *sparse = &plane->sparse;
+   const uint64_t tail_pages = sparse->tail_size_B / KK_SPARSE_PAGE_SIZE;
+   const uint64_t residency_pages =
+      plane->mtl_handle_residency
+         ? kk_sparse_tail_pages(plane, plane->mtl_handle_residency,
+                                sparse->residency_tail_level)
+         : 0u;
+
+   for (uint64_t i = 0; i < count; i++, page++, heap_page++) {
+      kk_queue_map_tail_page(queue, kk_plane_deferred(plane, deferred), plane,
+                             plane->mtl_handle, sparse->texture_tail_level,
+                             layer, page, mem, heap_page);
+
+      uint64_t last = page + 1 == tail_pages ? residency_pages : page + 1;
+      for (uint64_t r = page; r < MIN2(last, residency_pages); r++)
+         kk_queue_map_tail_page(queue, deferred, plane,
+                                plane->mtl_handle_residency,
+                                sparse->residency_tail_level, layer, r, mem,
+                                heap_page);
+   }
+}
+
+static void
+kk_queue_bind_image_opaque(struct kk_queue *queue,
+                           struct util_dynarray *deferred,
+                           struct kk_image *image,
+                           const VkSparseMemoryBind *bind)
+{
+   VK_FROM_HANDLE(kk_device_memory, mem, bind->memory);
+   struct kk_image_plane *plane = &image->planes[0];
+   const struct kk_sparse_layout *sparse = &plane->sparse;
+
+   uint64_t page = bind->resourceOffset / KK_SPARSE_PAGE_SIZE;
+   uint64_t page_count = DIV_ROUND_UP(bind->size, KK_SPARSE_PAGE_SIZE);
+   uint64_t heap_page = bind->memoryOffset / KK_SPARSE_PAGE_SIZE;
+   const uint64_t layer_pages = sparse->layer_stride_B / KK_SPARSE_PAGE_SIZE;
+
+   while (page_count > 0 && layer_pages > 0) {
+      uint32_t layer = page / layer_pages;
+      uint64_t layer_page = page % layer_pages;
+      if (layer >= plane->layout.layers)
+         break;
+
+      uint32_t level = 0;
+      while (level < sparse->tail_level &&
+             layer_page >=
+                sparse->level_offset_B[level + 1] / KK_SPARSE_PAGE_SIZE)
+         level++;
+
+      uint64_t level_page =
+         layer_page - sparse->level_offset_B[level] / KK_SPARSE_PAGE_SIZE;
+      uint64_t count;
+      struct mtl_sparse_texture_mapping mapping = {
+         .level = level,
+         .slice = layer,
+         .heap_page = heap_page,
+      };
+
+      if (level == sparse->tail_level) {
+         uint64_t tail_pages = sparse->tail_size_B / KK_SPARSE_PAGE_SIZE;
+         count = MIN2(page_count, tail_pages - level_page);
+         kk_queue_bind_image_tail(queue, deferred, plane, layer, level_page,
+                                  count, mem, heap_page);
+      } else {
+         struct mtl_size tiles = kk_sparse_level_tiles(plane, level);
+         uint64_t x = level_page % tiles.x;
+         uint64_t y = (level_page / tiles.x) % tiles.y;
+         uint64_t z = level_page / (tiles.x * tiles.y);
+         count = MIN2(page_count, tiles.x - x);
+         mapping.origin = (struct mtl_size){x, y, z};
+         mapping.size = (struct mtl_size){count, 1, 1};
+         kk_queue_map_texture(queue, kk_plane_deferred(plane, deferred),
+                              plane->mtl_handle, mem, mapping);
+         if (plane->mtl_handle_residency)
+            kk_queue_map_texture(queue, deferred, plane->mtl_handle_residency,
+                                 mem, mapping);
+      }
+
+      page += count;
+      page_count -= count;
+      heap_page += count;
+   }
+}
+
+static void
+kk_queue_bind_image(struct kk_queue *queue, struct util_dynarray *deferred,
+                    struct kk_image *image,
+                    const VkSparseImageMemoryBind *bind)
+{
+   VK_FROM_HANDLE(kk_device_memory, mem, bind->memory);
+   struct kk_image_plane *plane = &image->planes[0];
+   const struct mtl_size tile = plane->sparse.tile_px;
+
+   struct mtl_sparse_texture_mapping mapping = {
+      .origin = {bind->offset.x / tile.x, bind->offset.y / tile.y,
+                 bind->offset.z / tile.z},
+      .size = {DIV_ROUND_UP(bind->extent.width, tile.x),
+               DIV_ROUND_UP(bind->extent.height, tile.y),
+               DIV_ROUND_UP(bind->extent.depth, tile.z)},
+      .level = bind->subresource.mipLevel,
+      .slice = bind->subresource.arrayLayer,
+      .heap_page = bind->memoryOffset / KK_SPARSE_PAGE_SIZE,
+   };
+   kk_queue_map_texture(queue, kk_plane_deferred(plane, deferred),
+                        plane->mtl_handle, mem, mapping);
+   if (plane->mtl_handle_residency)
+      kk_queue_map_texture(queue, deferred, plane->mtl_handle_residency, mem,
+                           mapping);
+}
+
+static void
+kk_queue_bind_sparse(struct kk_queue *queue, struct vk_queue_submit *submit,
+                     struct util_dynarray *fills)
+{
+   struct util_dynarray deferred = UTIL_DYNARRAY_INIT;
+
+   for (uint32_t i = 0; i < submit->image_opaque_bind_count; i++) {
+      const VkSparseImageOpaqueMemoryBindInfo *info =
+         &submit->image_opaque_binds[i];
+      VK_FROM_HANDLE(kk_image, image, info->image);
+
+      for (uint32_t j = 0; j < info->bindCount; j++)
+         kk_queue_bind_image_opaque(queue, &deferred, image, &info->pBinds[j]);
+   }
+
+   for (uint32_t i = 0; i < submit->image_bind_count; i++) {
+      const VkSparseImageMemoryBindInfo *info = &submit->image_binds[i];
+      VK_FROM_HANDLE(kk_image, image, info->image);
+
+      for (uint32_t j = 0; j < info->bindCount; j++)
+         kk_queue_bind_image(queue, &deferred, image, &info->pBinds[j]);
+   }
+
+   util_dynarray_foreach(&deferred, struct kk_texture_mapping, op) {
+      mtl_command_queue_update_texture_mappings(queue->mtl_handle, op->texture,
+                                                op->heap, &op->mapping, 1u);
+   }
+   util_dynarray_fini(&deferred);
+
+   for (uint32_t i = 0; i < submit->buffer_bind_count; i++) {
+      const VkSparseBufferMemoryBindInfo *info = &submit->buffer_binds[i];
+      VK_FROM_HANDLE(kk_buffer, buffer, info->buffer);
+
+      for (uint32_t j = 0; j < info->bindCount; j++)
+         kk_queue_bind_buffer(queue, buffer, &info->pBinds[j], fills);
+   }
+}
+
 static VkResult
 kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -193,6 +448,17 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
     * work. All resources should have been allocated before submission.
     * Otherwise, users are playing with fire. */
    kk_device_make_resources_resident(dev);
+
+   if (vk_queue_submit_has_bind(submit)) {
+      struct util_dynarray fills = UTIL_DYNARRAY_INIT;
+      kk_queue_bind_sparse(queue, submit, &fills);
+      mtl_command_queue_commit_mapping_barrier(
+         queue->mtl_handle, dev->mtl_handle,
+         dev->sparse_residency.bo ? dev->sparse_residency.bo->map : NULL,
+         util_dynarray_begin(&fills),
+         util_dynarray_num_elements(&fills, struct mtl_buffer_fill));
+      util_dynarray_fini(&fills);
+   }
 
    for (uint32_t i = 0; i < submit->command_buffer_count; ++i) {
       struct kk_cmd_buffer *cmd_buffer =
