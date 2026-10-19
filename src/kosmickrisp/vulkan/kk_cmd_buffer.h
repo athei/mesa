@@ -73,6 +73,9 @@ struct kk_descriptor_state {
    struct kk_push_descriptor_set *push[KK_MAX_SETS];
 };
 
+#define KK_SINK_RO_OFFSET 64
+#define KK_SINK_SIZE      128
+
 struct kk_per_draw_data {
    uint32_t draw_id;
    uint32_t index_size;
@@ -93,6 +96,9 @@ struct kk_per_draw_data {
 
    /* Whether the last vertex of a primitive is its provoking vertex */
    uint32_t provoking_last;
+   uint32_t rasterization_stream;
+
+   uint64_t sink;
 };
 
 struct kk_attachment {
@@ -193,6 +199,12 @@ struct kk_graphics_state {
       uint32_t index_count;
       uint32_t instance_count;
    } gs;
+
+   struct {
+      struct kk_addr_range buffers[KK_MAX_XFB_BUFFERS];
+      uint64_t offsets;
+      uint64_t queries[KK_MAX_XFB_STREAMS];
+   } xfb;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
    struct vk_vertex_input_state _dynamic_vi;

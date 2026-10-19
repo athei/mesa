@@ -24,6 +24,8 @@
 #define KK_MIN_TEXEL_BUFFER_ALIGNMENT    16
 #define KK_MIN_UBO_ALIGNMENT             64
 #define KK_MAX_VIEWPORTS                 16
+#define KK_MAX_XFB_BUFFERS               4
+#define KK_MAX_XFB_STREAMS               4
 #define KK_MAX_DESCRIPTOR_SIZE           64
 #define KK_MAX_PUSH_DESCRIPTORS          32
 #define KK_MAX_DESCRIPTOR_SET_SIZE       (1u << 30)

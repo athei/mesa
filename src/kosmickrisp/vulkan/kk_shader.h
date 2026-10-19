@@ -90,6 +90,9 @@ struct kk_shader_info {
          bool has_ds;
          bool has_depth_write;
          bool has_stencil_test;
+
+         struct poly_gs_info gs;
+         bool xfb_passthrough;
       } vs;
 
       struct {
@@ -125,6 +128,8 @@ struct kk_pipeline_handles {
          /* VS, TCS, TES and the GS compute pass at most run before the render
           * pipeline. */
          mtl_compute_pipeline_state *pre_render[4];
+         mtl_compute_pipeline_state *gs_count;
+         mtl_compute_pipeline_state *gs_pre;
          mtl_depth_stencil_state *ds_handle;
          uint32_t pre_render_count;
       } gfx;
@@ -146,6 +151,8 @@ struct kk_shader {
    /* Compute pass of a GS. Its rasterization VS is in
     * msl_data[MESA_SHADER_GEOMETRY]. */
    struct msl_compile_data gs_main;
+   struct msl_compile_data gs_count;
+   struct msl_compile_data gs_pre;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,

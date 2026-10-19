@@ -89,6 +89,18 @@ libkk_unroll_geometry(
                         restart_index, flatshade_first, true, mode, scratch);
 }
 
+KERNEL(1)
+libkk_draw_byte_count(global uint32_t *out_draw, global uint32_t *counter,
+                      uint32_t counter_offset, uint32_t stride,
+                      uint32_t instance_count, uint32_t first_instance)
+{
+   uint32_t bytes = *counter;
+   out_draw[0] = bytes > counter_offset ? (bytes - counter_offset) / stride : 0;
+   out_draw[1] = instance_count;
+   out_draw[2] = 0;
+   out_draw[3] = first_instance;
+}
+
 /* Unrolls restart without reordering vertices for a GS input. */
 KERNEL(1024)
 libkk_unroll_restart(uint64_t index_buffer, global struct poly_heap *heap,

@@ -834,13 +834,31 @@ kk_calculate_vbo_clamp(uint64_t vbuf, uint64_t sink, enum pipe_format format,
    }
 }
 
+static const struct poly_gs_info *
+kk_gs_info(struct kk_cmd_buffer *cmd)
+{
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   if (vs && (vs->info.vs.additional_stages_bits &
+              BITFIELD_BIT(MESA_SHADER_GEOMETRY)))
+      return &vs->info.vs.gs;
+
+   return NULL;
+}
+
+static bool
+kk_gs_is_passthrough(struct kk_cmd_buffer *cmd)
+{
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   return vs && vs->info.vs.xfb_passthrough;
+}
+
 /* The GS output primitive if one is bound, otherwise the input topology */
 static enum mesa_prim
 kk_rast_prim(struct kk_cmd_buffer *cmd)
 {
-   struct kk_shader *gs = cmd->state.shaders[MESA_SHADER_GEOMETRY];
+   const struct poly_gs_info *gs = kk_gs_info(cmd);
    if (gs)
-      return gs->info.gs.mode;
+      return gs->mode;
 
    return vk_topology_to_mesa(
       cmd->vk.dynamic_graphics_state.ia.primitive_topology);
@@ -1274,8 +1292,12 @@ kk_gs_in_prim(struct kk_cmd_buffer *cmd)
    if (cmd->state.shaders[MESA_SHADER_TESS_EVAL])
       return cmd->state.gfx.tess.prim;
 
-   return vk_topology_to_mesa(
-      cmd->vk.dynamic_graphics_state.ia.primitive_topology);
+   enum mesa_prim prim =
+      vk_topology_to_mesa(cmd->vk.dynamic_graphics_state.ia.primitive_topology);
+   if (kk_gs_is_passthrough(cmd) && mesa_prim_has_adjacency(prim))
+      return u_reduced_prim(prim);
+
+   return prim;
 }
 
 static uint64_t
@@ -1286,9 +1308,9 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
    bool indirect = kk_grid_is_indirect(draw->grid) ||
                    cmd->state.shaders[MESA_SHADER_TESS_EVAL];
    struct kk_graphics_state *gfx = &cmd->state.gfx;
-   struct kk_shader *gs = cmd->state.shaders[MESA_SHADER_GEOMETRY];
-   enum poly_gs_shape shape = gs->info.gs.shape;
-   uint32_t max_indices = gs->info.gs.max_indices;
+   const struct poly_gs_info *gs = kk_gs_info(cmd);
+   enum poly_gs_shape shape = gs->shape;
+   uint32_t max_indices = gs->max_indices;
 
    enum mesa_prim mode = kk_gs_in_prim(cmd);
    if (restart)
@@ -1298,6 +1320,32 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
 
    struct poly_geometry_params params;
    poly_geometry_params_init(&params, mode, wg_size);
+
+   if (gs->prefix_sum)
+      params.count_buffer_stride = gs->count_words * sizeof(uint32_t);
+
+   uint64_t sink = gfx->per_draw_data.sink;
+   bool xfb_active = gfx->xfb.offsets != 0;
+   for (uint32_t i = 0; i < POLY_MAX_VERTEX_STREAMS; i++) {
+      uint64_t query = xfb_active ? gfx->xfb.queries[i] : 0;
+      params.xfb_prims_generated_counter[i] = query ? query : sink;
+      params.prims_generated_counter[i] =
+         query ? query + sizeof(uint64_t) : sink;
+      params.xfb_overflow[i] = sink;
+   }
+   params.xfb_any_overflow = sink;
+
+   for (uint32_t i = 0; i < POLY_MAX_SO_BUFFERS; i++) {
+      struct kk_addr_range buffer = gfx->xfb.buffers[i];
+      if (xfb_active && buffer.range) {
+         params.xfb_base_original[i] = buffer.addr;
+         params.xfb_size[i] = buffer.range;
+         params.xfb_offs_ptrs[i] =
+            gfx->xfb.offsets + i * sizeof(uint32_t);
+      } else {
+         params.xfb_offs_ptrs[i] = sink + KK_SINK_RO_OFFSET;
+      }
+   }
 
    if (indirect) {
       /* The indirect setup kernel writes the draw and allocates from the
@@ -1311,6 +1359,14 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
       gfx->gs.index_count = params.draw.index_count;
       gfx->gs.instance_count = params.draw.instance_count;
 
+      if (gs->prefix_sum) {
+         params.count_buffer =
+            kk_pool_alloc(cmd,
+                          MAX2(params.input_primitives *
+                                  params.count_buffer_stride, 4u),
+                          4).gpu;
+      }
+
       if (shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
          uint32_t size_B = gfx->gs.index_count * sizeof(uint32_t);
          params.output_index_buffer = kk_pool_alloc(cmd, size_B, 4).gpu;
@@ -1321,9 +1377,9 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
 
    if (shape == POLY_GS_SHAPE_STATIC_INDEXED) {
       /* Metal has no 8-bit indices and restarts 16-bit ones at 0xFFFF */
-      uint16_t indices[ARRAY_SIZE(gs->info.gs.topology)];
+      uint16_t indices[ARRAY_SIZE(gs->topology)];
       for (uint32_t i = 0u; i < max_indices; ++i) {
-         uint8_t index = gs->info.gs.topology[i];
+         uint8_t index = gs->topology[i];
          indices[i] = index == UINT8_MAX ? UINT16_MAX : index;
       }
 
@@ -1756,7 +1812,7 @@ build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
    }
 
    /* So does a GS */
-   if (cmd->state.shaders[MESA_SHADER_GEOMETRY]) {
+   if (kk_gs_info(cmd)) {
       mask |= BITFIELD_BIT(MESA_SHADER_GEOMETRY);
    }
 
@@ -1979,7 +2035,7 @@ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
     * topology through poly's bounds-checked input assembly, and
     * kk_draw_without_restart unrolls restart before it runs. */
    bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
-   bool geom = cmd->state.shaders[MESA_SHADER_GEOMETRY];
+   bool geom = kk_gs_info(cmd);
    if (tess || geom)
       return false;
 
@@ -2041,6 +2097,10 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
    bool tess = upload_mask & BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
    bool geom = upload_mask & BITFIELD_BIT(MESA_SHADER_GEOMETRY);
    if (tess || geom) {
+      struct kk_ptr sink = kk_pool_alloc(cmd, KK_SINK_SIZE, 16);
+      if (sink.cpu)
+         memset(sink.cpu, 0, KK_SINK_SIZE);
+      gfx->per_draw_data.sink = sink.gpu;
       gfx->per_draw_data.index_size = draw->index.el_size_B;
       gfx->per_draw_data.base_vertex_addr = upload_base_vertex(cmd, draw);
       gfx->per_draw_data.base_instance_addr = upload_base_instance(cmd, draw);
@@ -2064,6 +2124,7 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
          &cmd->vk.dynamic_graphics_state;
       gfx->per_draw_data.provoking_last =
          dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+      gfx->per_draw_data.rasterization_stream = dyn->rs.rasterization_stream;
    }
 
    struct kk_ptr shader_data_gpu =
@@ -2215,10 +2276,10 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
    struct kk_graphics_state *gfx = &cmd->state.gfx;
    struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
    struct kk_shader *tes = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
-   struct kk_shader *gs = cmd->state.shaders[MESA_SHADER_GEOMETRY];
+   const struct poly_gs_info *gs = kk_gs_info(cmd);
    uint64_t vertex_params = gfx->per_draw_data.vertex_params;
    uint64_t geometry_params = gfx->per_draw_data.geometry_params;
-   enum poly_gs_shape shape = gs->info.gs.shape;
+   enum poly_gs_shape shape = gs->shape;
    struct kk_grid grid_vs, grid_gs;
 
    enum mesa_prim mode = kk_gs_in_prim(cmd);
@@ -2237,8 +2298,9 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
          .heap = kk_heap(cmd),
          .vs_outputs = (tes ? tes : vs)->info.outputs_written,
          .prim = mode,
-         .max_indices = gs->info.gs.max_indices,
+         .max_indices = gs->max_indices,
          .shape = shape,
+         .prefix_sum = gs->prefix_sum,
       };
 
       if (draw.index.el_size_B) {
@@ -2274,6 +2336,23 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
       enc, vs->pipeline.gfx.pre_render[pre_render_count - 2u]);
    kk_dispatch_compute(enc, grid_vs, local_size);
 
+   if (gs->prefix_sum) {
+      mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
+                                       MTL_STAGE_DISPATCH);
+      mtl_compute_set_pipeline_state(enc, vs->pipeline.gfx.gs_count);
+      kk_dispatch_compute(enc, grid_gs, local_size);
+
+      libkk_prefix_sum_geom(cmd, kk_grid_1d(1024u * gs->count_words), true,
+                            geometry_params);
+   }
+
+   if (gs->xfb) {
+      mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
+                                       MTL_STAGE_DISPATCH);
+      mtl_compute_set_pipeline_state(enc, vs->pipeline.gfx.gs_pre);
+      kk_dispatch_compute(enc, kk_grid_1d(1u), (struct mtl_size){1, 1, 1});
+   }
+
    mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
                                     MTL_STAGE_DISPATCH);
    mtl_compute_set_pipeline_state(
@@ -2281,7 +2360,7 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
    kk_dispatch_compute(enc, grid_gs, local_size);
 
    struct kk_draw_data rast = {
-      .primitive_type = mesa_prim_to_mtl_primitive_type(gs->info.gs.mode),
+      .primitive_type = mesa_prim_to_mtl_primitive_type(gs->mode),
    };
 
    if (poly_gs_indexed(shape)) {
@@ -2308,7 +2387,7 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
 {
    /* Emulated stages rasterize a primitive of their own */
    bool emulated = cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
-                   cmd->state.shaders[MESA_SHADER_GEOMETRY];
+                   kk_gs_info(cmd);
    struct kk_draw_data draw = {
       .index.gpu = data->index_buffer,
       .index.el_size_B = data->index_buffer_el_size_B,
@@ -2356,14 +2435,14 @@ kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
       return;
 
    bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
-   bool geom = cmd->state.shaders[MESA_SHADER_GEOMETRY];
+   bool geom = kk_gs_info(cmd);
 
    /* Unroll geometry. Skip draw if we fail. */
    if (requires_unroll(cmd, data) && !kk_unroll_geometry(cmd, data))
       return;
 
-   if (!geom && mesa_prim_has_adjacency(data->prim) &&
-       !kk_unroll_adjacency(cmd, data))
+   if ((!geom || kk_gs_is_passthrough(cmd)) &&
+       mesa_prim_has_adjacency(data->prim) && !kk_unroll_adjacency(cmd, data))
       return;
 
    /* Patch lists do not restart, so only a GS fed by the input assembly needs
@@ -2640,6 +2719,45 @@ kk_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer,
 }
 
 VKAPI_ATTR void VKAPI_CALL
+kk_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
+                               uint32_t instanceCount, uint32_t firstInstance,
+                               VkBuffer counterBuffer,
+                               VkDeviceSize counterBufferOffset,
+                               uint32_t counterOffset, uint32_t vertexStride)
+{
+   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(kk_buffer, counter, counterBuffer);
+
+   struct kk_ptr draw = kk_pool_alloc(cmd, sizeof(VkDrawIndirectCommand), 4u);
+   if (unlikely(!draw.gpu))
+      return;
+
+   libkk_draw_byte_count(cmd, kk_grid_1d(1), true, draw.gpu,
+                         vk_buffer_address(&counter->vk, counterBufferOffset),
+                         counterOffset, vertexStride, instanceCount,
+                         firstInstance);
+
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+
+   struct kk_draw_command data = {
+      .prim = vk_topology_to_mesa(dyn->ia.primitive_topology),
+      .upload_mask = build_per_draw_upload_mask(cmd),
+      .indirect = true,
+      .predicate_count = cmd->state.cond_render.enabled ? 1u : 0u,
+      .predicate_op[0] = cmd->state.cond_render.inverted
+                            ? KK_PREDICATE_EQ_ZERO
+                            : KK_PREDICATE_NEQ_ZERO,
+      .draw_count = 1,
+      .predicate_addr[0] = cmd->state.cond_render.address,
+      .indirect_command.addr = draw.gpu,
+      .indirect_command.stride = sizeof(VkDrawIndirectCommand),
+   };
+
+   kk_draw(cmd, &data);
+}
+
+VKAPI_ATTR void VKAPI_CALL
 kk_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer,
                               const VkDrawIndirect2InfoKHR *pInfo)
 {
@@ -2794,7 +2912,7 @@ kk_cmd_draw_generated(struct kk_cmd_buffer *cmd,
 
    if (params.has_ib && data.indexed) {
       bool emulated = cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
-                      cmd->state.shaders[MESA_SHADER_GEOMETRY];
+                      kk_gs_info(cmd);
 
       libkk_dgc_unroll(cmd, kk_grid_1d(1024 * info->maxSequenceCount), true,
                        kk_heap(cmd), bufs.cmds, bufs.unrolled, bufs.ib_info,
