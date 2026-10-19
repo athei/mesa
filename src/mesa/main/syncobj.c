@@ -293,6 +293,11 @@ _mesa_fence_sync(struct gl_context *ctx, GLenum condition, GLbitfield flags)
       assert(condition == GL_SYNC_GPU_COMMANDS_COMPLETE && flags == 0);
       assert(syncObj->fence == NULL);
 
+      /* The fence has to come after vertices that glBegin/glEnd left in the
+       * vbo module's buffer, so draw those first.
+       */
+      FLUSH_VERTICES(ctx, 0, 0);
+
       /* Deferred flush are only allowed when there's a single context. See issue 1430 */
       ctx->pipe->flush(ctx->pipe, &syncObj->fence, ctx->Shared->RefCount == 1 ? PIPE_FLUSH_DEFERRED : 0);
 
