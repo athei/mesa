@@ -9,6 +9,7 @@
 #include "vk_util.h"
 
 #include "util/cnd_monotonic.h"
+#include "util/os_time.h"
 #include "util/timespec.h"
 #include "util/u_vector.h"
 
@@ -348,7 +349,33 @@ struct wsi_metal_present_info {
 
    struct u_cnd_monotonic present_id_cond;
    uint64_t present_id;
+
+   /* The highest refresh rate in Hz of the screen showing the layer, which
+    * paces FIFO presents. The main thread writes it. */
+   uint32_t refresh_rate;
+   /* Set while a refresh rate query is queued on the main thread, so there
+    * is never more than one. */
+   uint32_t refresh_rate_pending;
+
+   /* Paced presents in a row that Metal let go without showing them
+    * (presentedTime 0). The presented handlers write it. */
+   uint32_t undisplayed_run;
 };
+
+/* Paced presents in a row that come back not shown before the swapchain
+ * paces its presents on the CPU (wsi_metal_swapchain_hold_unshown). A window
+ * that has just come on screen leaves its first few drawables unshown, and
+ * one that is being covered a few more, so the run has to be longer than
+ * those. At 120 Hz a window that shows nothing reaches it in about 130 ms. */
+#define WSI_METAL_UNDISPLAYED_LIMIT 16
+
+/* The refresh rate FIFO presents are paced at until the main thread has
+ * looked at the screen, and when no screen reports one. */
+#define WSI_METAL_DEFAULT_REFRESH_RATE 60
+
+/* The screen is looked at again once per this many presents, which is how a
+ * window moved onto a screen with another refresh rate is noticed. */
+#define WSI_METAL_REFRESH_RATE_PRESENTS 32
 
 struct wsi_metal_swapchain {
    struct wsi_swapchain base;
@@ -360,6 +387,11 @@ struct wsi_metal_swapchain {
 
    struct wsi_metal_layer_blit_context *blit_context;
    struct wsi_metal_present_info *present_info;
+   uint32_t presents_since_refresh_rate;
+
+   /* When the CPU hold last let a paced present go, in os_time_get_nano()
+    * time, or 0 before the first hold. */
+   int64_t unshown_release_ns;
 
    uint32_t current_image_index;
 
@@ -400,6 +432,7 @@ wsi_metal_create_present_info()
    }
 
    info->ref_count = 1;
+   info->refresh_rate = WSI_METAL_DEFAULT_REFRESH_RATE;
    return info;
 }
 
@@ -666,23 +699,110 @@ wsi_metal_swapchain_set_present_mode(struct wsi_swapchain *wsi_chain,
                                      VkPresentModeKHR mode)
 {
    struct wsi_metal_swapchain *chain = (struct wsi_metal_swapchain *)wsi_chain;
-   const bool immediate_mode = mode == VK_PRESENT_MODE_IMMEDIATE_KHR;
-   wsi_metal_layer_set_immediate(chain->surface->pLayer, immediate_mode);
+   chain->base.present_mode = mode;
 }
 
 static void
-wsi_metal_present_complete(void *present_info_ptr, uint64_t present_id)
+wsi_metal_refresh_rate_complete(void *present_info_ptr, uint32_t refresh_rate)
 {
    struct wsi_metal_present_info *present_info = present_info_ptr;
 
-   mtx_lock(&present_info->mutex);
-   if (present_id > present_info->present_id) {
-      present_info->present_id = present_id;
-      u_cnd_monotonic_broadcast(&present_info->present_id_cond);
-   }
-   mtx_unlock(&present_info->mutex);
+   /* Without a screen to ask, the rate in use stays. */
+   if (refresh_rate)
+      p_atomic_set(&present_info->refresh_rate, refresh_rate);
+   p_atomic_set(&present_info->refresh_rate_pending, 0);
 
    wsi_metal_release_present_info(present_info);
+}
+
+static void
+wsi_metal_swapchain_query_refresh_rate(struct wsi_metal_swapchain *chain)
+{
+   struct wsi_metal_present_info *present_info = chain->present_info;
+
+   if (p_atomic_cmpxchg(&present_info->refresh_rate_pending, 0, 1) != 0)
+      return;
+
+   chain->presents_since_refresh_rate = 0;
+   wsi_metal_retain_present_info(present_info);
+   wsi_metal_layer_query_refresh_rate(chain->surface->pLayer,
+                                      wsi_metal_refresh_rate_complete,
+                                      present_info);
+}
+
+/* How long after the previous frame was shown this present may be shown, in
+ * seconds. Display sync is off, so this is what keeps FIFO presents to one
+ * per refresh of the screen. On a variable refresh rate screen it caps the
+ * rate at the screen's maximum and, when the layer goes straight to the
+ * display, lets the screen follow anything slower. The other FIFO variants
+ * are paced the same way, should the surface ever offer them; the other
+ * modes present as soon as they can. */
+static double
+wsi_metal_swapchain_min_present_duration(const struct wsi_metal_swapchain *chain)
+{
+   switch (chain->base.present_mode) {
+   case VK_PRESENT_MODE_FIFO_KHR:
+   case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+   case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR:
+      return 1.0 / p_atomic_read(&chain->present_info->refresh_rate);
+   default:
+      return 0.0;
+   }
+}
+
+/* The presented handler of a present. A paced present that was not shown
+ * extends the run of undisplayed ones, a shown one ends it; present_id is 0
+ * for a present nobody waits for. */
+static void
+wsi_metal_present_complete(void *present_info_ptr, uint64_t present_id,
+                           bool paced, double presented_time)
+{
+   struct wsi_metal_present_info *present_info = present_info_ptr;
+
+   if (paced) {
+      if (presented_time > 0.0)
+         p_atomic_set(&present_info->undisplayed_run, 0);
+      else
+         p_atomic_inc(&present_info->undisplayed_run);
+   }
+
+   if (present_id) {
+      mtx_lock(&present_info->mutex);
+      if (present_id > present_info->present_id) {
+         present_info->present_id = present_id;
+         u_cnd_monotonic_broadcast(&present_info->present_id_cond);
+      }
+      mtx_unlock(&present_info->mutex);
+   }
+
+   wsi_metal_release_present_info(present_info);
+}
+
+/* Holds a paced present on the CPU while the window shows nothing.
+ *
+ * presentAfterMinimumDuration: counts the duration from when the previous
+ * drawable of the layer was shown. While the layer shows nothing (a hidden,
+ * minimized or covered window, or a locked screen), every present comes back
+ * at once with presentedTime 0 and the duration has nothing to count from,
+ * so FIFO would run as fast as the application renders. After
+ * WSI_METAL_UNDISPLAYED_LIMIT such presents in a row, each paced present
+ * waits here until one duration after the previous one this hold let go, or
+ * goes at once if it comes later than that, until a present is shown again.
+ * A late wake-up (timer coalescing in a background process) lets the
+ * presents that queued up meanwhile go at once, so the rate holds on
+ * average. */
+static void
+wsi_metal_swapchain_hold_unshown(struct wsi_metal_swapchain *chain,
+                                 double min_duration)
+{
+   const int64_t now = os_time_get_nano();
+   int64_t at = now;
+
+   if (chain->unshown_release_ns)
+      at = MAX2(chain->unshown_release_ns + (int64_t)(min_duration * 1e9), now);
+   if (at > now)
+      os_time_nanosleep_until(at);
+   chain->unshown_release_ns = at;
 }
 
 static VkResult
@@ -698,22 +818,36 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
 
    struct wsi_metal_image *image = &chain->images[image_index];
 
-   if (present_id && wsi_chain->present_wait_enabled) {
+   if (++chain->presents_since_refresh_rate >= WSI_METAL_REFRESH_RATE_PRESENTS)
+      wsi_metal_swapchain_query_refresh_rate(chain);
+   const double min_duration = wsi_metal_swapchain_min_present_duration(chain);
+   const bool paced = min_duration > 0.0;
+
+   /* Paced presents always get a handler, which tells whether they were
+    * shown. */
+   if (!wsi_chain->present_wait_enabled)
+      present_id = 0;
+   if (present_id || paced) {
       wsi_metal_retain_present_info(chain->present_info);
       wsi_metal_layer_add_presented_handler(
          image->drawable, wsi_metal_present_complete, chain->present_info,
-         present_id);
+         present_id, paced);
    }
+
+   if (paced &&
+       p_atomic_read(&chain->present_info->undisplayed_run) >=
+          WSI_METAL_UNDISPLAYED_LIMIT)
+      wsi_metal_swapchain_hold_unshown(chain, min_duration);
 
    if (wsi_chain->wsi->sw) {
       wsi_metal_layer_blit_and_present(chain->blit_context,
          &image->drawable,
          image->base.cpu_map,
          chain->extent.width, chain->extent.height,
-         image->base.row_pitches[0]);
+         image->base.row_pitches[0], min_duration);
    } else {
       /* Blit is already recorded, just present now */
-      wsi_metal_layer_present(&image->drawable);
+      wsi_metal_layer_present(&image->drawable, min_duration);
    }
 
    uint32_t width = 0u, height = 0u;
@@ -890,8 +1024,6 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    const int num_images = pCreateInfo->minImageCount;
    const bool opaque_composition =
       pCreateInfo->compositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-   const bool immediate_mode =
-      pCreateInfo->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
 
    /* Non-software implementations need to work around a Metal bug
     * when presenting through Metal4. This is accomplished through
@@ -905,7 +1037,7 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    VkResult result = wsi_metal_layer_configure(metal_surface->pLayer,
       pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
       num_images, pCreateInfo->imageFormat, pCreateInfo->imageColorSpace,
-      layer_opaque, immediate_mode, framebuffer_only);
+      layer_opaque, framebuffer_only);
    if (result != VK_SUCCESS)
       return result;
 
@@ -956,6 +1088,15 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_present_info;
    }
+
+   /* A swapchain recreated for a resize keeps presenting at the rate of the
+    * one it replaces while the main thread looks at the screen again. */
+   if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(wsi_metal_swapchain, old_chain, pCreateInfo->oldSwapchain);
+      chain->present_info->refresh_rate =
+         p_atomic_read(&old_chain->present_info->refresh_rate);
+   }
+   wsi_metal_swapchain_query_refresh_rate(chain);
 
    if (wsi_device->metal.get_mtl4_command_queue) {
       void *mtl4_queue = wsi_device->metal.get_mtl4_command_queue(chain->base.device);
