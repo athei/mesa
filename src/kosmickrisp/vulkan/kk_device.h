@@ -19,6 +19,8 @@
 #include "libkk_shaders.h"
 
 #include "util/u_dynarray.h"
+#include "util/u_idalloc.h"
+#include "util/vma.h"
 
 #include "vk_device.h"
 #include "vk_meta.h"
@@ -123,9 +125,23 @@ struct kk_device {
    util_once_flag heap_init_once;
 
    bool gpu_capture_active;
+
+   struct {
+      struct kk_bo *bo;
+      struct util_vma_heap heap;
+      struct util_idalloc views;
+      struct util_idalloc tags;
+      simple_mtx_t lock;
+   } sparse_residency;
 };
 
 VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+
+static inline void
+kk_device_count_sparse_residency(struct kk_device *dev, int delta)
+{
+   p_atomic_add((uint32_t *)dev->sparse_residency.bo->cpu, delta);
+}
 
 static inline struct kk_physical_device *
 kk_device_physical(const struct kk_device *dev)

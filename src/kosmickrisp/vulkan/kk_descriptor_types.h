@@ -28,7 +28,8 @@ struct kk_sampled_image_descriptor {
 
    uint16_t sampler_minmax_flags;
    uint32_t border[4];
-   uint64_t pad_to_power_2[3];
+   uint64_t residency_gpu_resource_id;
+   uint64_t pad_to_power_2[2];
 };
 
 static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,
@@ -38,16 +39,18 @@ struct kk_storage_image_descriptor {
    uint64_t image_gpu_resource_id;
    uint32_t buffer_offset_el;
    uint32_t buffer_size_el;
+   uint64_t residency_gpu_resource_id;
+   uint64_t pad_to_power_2;
 };
 
-static_assert(sizeof(struct kk_storage_image_descriptor) == 16,
+static_assert(sizeof(struct kk_storage_image_descriptor) == 32,
               "kk_storage_image_descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */
 struct kk_buffer_address {
    uint64_t base_addr;
    uint32_t size;
-   uint32_t zero; /* Must be zero! */
+   uint32_t residency;
 };
 
 static_assert(sizeof(struct kk_buffer_address) == 16,

@@ -15,6 +15,14 @@
 #include <Metal/MTLTexture.h>
 
 uint64_t
+mtl_texture_get_tail_size(mtl_texture *texture)
+{
+   @autoreleasepool {
+      return ((id<MTLTexture>)texture).tailSizeInBytes;
+   }
+}
+
+uint64_t
 mtl_texture_get_gpu_resource_id(mtl_texture *texture)
 {
    @autoreleasepool {

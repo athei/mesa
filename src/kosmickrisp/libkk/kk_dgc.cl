@@ -61,7 +61,7 @@ libkk_dgc_process(constant struct libkk_dgc_params *p)
       }
 
       info[0] = active ? seq[p->ib_src_dw + 0] : 0;
-      info[1] = active ? seq[p->ib_src_dw + 1] : 0;
+      info[1] = active ? seq[p->ib_src_dw + 1] & 0xffffu : 0;
       info[2] = size_B / el_B;
       info[3] = el_B;
    }
@@ -82,7 +82,7 @@ libkk_dgc_process(constant struct libkk_dgc_params *p)
    for (uint v = 0; v < p->vb_count; v++) {
       uint32_t binding = p->vb_binding[v];
       global uint32_t *vb = seq + p->vb_src_dw[v];
-      uint64_t va = vb[0] | ((uint64_t)vb[1] << 32);
+      uint64_t va = vb[0] | ((uint64_t)(vb[1] & 0xffffu) << 32);
       uint32_t size_B = vb[2];
       uint32_t stride_B = vb[3];
 
