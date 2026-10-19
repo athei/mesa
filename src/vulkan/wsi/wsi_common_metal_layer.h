@@ -15,6 +15,15 @@
 
 typedef void CAMetalDrawable;
 
+/* The application owns the CAMetalLayer it passes in
+ * VkMetalSurfaceCreateInfoEXT and may release it as soon as it no longer
+ * needs it itself. Surfaces and swapchains hold their own reference. */
+const CAMetalLayer *
+wsi_metal_layer_retain(const CAMetalLayer *metal_layer);
+
+void
+wsi_metal_layer_release(const CAMetalLayer *metal_layer);
+
 void
 wsi_metal_layer_size(const CAMetalLayer *metal_layer,
    uint32_t *width, uint32_t *height);

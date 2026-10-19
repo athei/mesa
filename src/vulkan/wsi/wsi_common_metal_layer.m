@@ -15,6 +15,18 @@
 
 #include "util/macros.h"
 
+const CAMetalLayer *
+wsi_metal_layer_retain(const CAMetalLayer *metal_layer)
+{
+   return [(CAMetalLayer *)metal_layer retain];
+}
+
+void
+wsi_metal_layer_release(const CAMetalLayer *metal_layer)
+{
+   [(CAMetalLayer *)metal_layer release];
+}
+
 void
 wsi_metal_layer_size(const CAMetalLayer *metal_layer,
    uint32_t *width, uint32_t *height)

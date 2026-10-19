@@ -383,7 +383,9 @@ struct wsi_metal_swapchain {
    VkExtent2D extent;
    VkFormat vk_format;
 
-   VkIcdSurfaceMetal *surface;
+   /* The layer of the surface, with a reference of the swapchain's own so
+    * that it outlives the surface if the swapchain is destroyed last. */
+   const CAMetalLayer *layer;
 
    struct wsi_metal_layer_blit_context *blit_context;
    struct wsi_metal_present_info *present_info;
@@ -637,7 +639,7 @@ wsi_metal_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
 
    while (1) {
       /* Try to acquire an drawable. Unfortunately we might block for up to 1 second. */
-      CAMetalDrawable *drawable = wsi_metal_layer_acquire_drawable(chain->surface->pLayer);
+      CAMetalDrawable *drawable = wsi_metal_layer_acquire_drawable(chain->layer);
       if (drawable) {
          uint32_t i = (chain->current_image_index++) % chain->base.image_count;
          struct wsi_metal_image *image = &chain->images[i];
@@ -725,7 +727,7 @@ wsi_metal_swapchain_query_refresh_rate(struct wsi_metal_swapchain *chain)
 
    chain->presents_since_refresh_rate = 0;
    wsi_metal_retain_present_info(present_info);
-   wsi_metal_layer_query_refresh_rate(chain->surface->pLayer,
+   wsi_metal_layer_query_refresh_rate(chain->layer,
                                       wsi_metal_refresh_rate_complete,
                                       present_info);
 }
@@ -851,7 +853,7 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    }
 
    uint32_t width = 0u, height = 0u;
-   wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
+   wsi_metal_layer_size(chain->layer, &width, &height);
    bool is_optimal = (width == chain->extent.width && height == chain->extent.height);
    return is_optimal ? VK_SUCCESS : VK_SUBOPTIMAL_KHR;
 }
@@ -904,7 +906,7 @@ wsi_metal_swapchain_set_hdr_metadata(struct wsi_swapchain *wsi_chain,
 {
    struct wsi_metal_swapchain *chain =
       (struct wsi_metal_swapchain *)wsi_chain;
-   wsi_metal_layer_set_hdr_metadata(chain->surface->pLayer, pMetadata);
+   wsi_metal_layer_set_hdr_metadata(chain->layer, pMetadata);
 }
 
 static void
@@ -998,8 +1000,10 @@ wsi_metal_swapchain_destroy(struct wsi_swapchain *wsi_chain,
    if (chain->base.wsi->metal.get_mtl4_command_queue) {
       void *mtl4_queue = chain->base.wsi->metal.get_mtl4_command_queue(chain->base.device);
       if (mtl4_queue)
-         wsi_metal_layer_remove_queue_resident(chain->surface->pLayer, mtl4_queue);
+         wsi_metal_layer_remove_queue_resident(chain->layer, mtl4_queue);
    }
+
+   wsi_metal_layer_release(chain->layer);
 
    wsi_swapchain_finish(&chain->base);
 
@@ -1079,7 +1083,7 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.image_count = num_images;
    chain->extent = pCreateInfo->imageExtent;
    chain->vk_format = pCreateInfo->imageFormat;
-   chain->surface = metal_surface;
+   chain->layer = wsi_metal_layer_retain(metal_surface->pLayer);
    chain->current_image_index = 0;
    chain->opaque_composition = opaque_composition;
 
@@ -1098,11 +1102,15 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    }
    wsi_metal_swapchain_query_refresh_rate(chain);
 
-   if (wsi_device->metal.get_mtl4_command_queue) {
-      void *mtl4_queue = wsi_device->metal.get_mtl4_command_queue(chain->base.device);
-      if (mtl4_queue)
-         wsi_metal_layer_make_queue_resident(metal_surface->pLayer, mtl4_queue);
-   }
+   /* The queue counts the adds of a residency set, so each swapchain adds
+    * the layer's set once and removes it once, also while a swapchain that
+    * replaces this one on the same layer is alive.
+    */
+   void *mtl4_queue = NULL;
+   if (wsi_device->metal.get_mtl4_command_queue)
+      mtl4_queue = wsi_device->metal.get_mtl4_command_queue(chain->base.device);
+   if (mtl4_queue)
+      wsi_metal_layer_make_queue_resident(chain->layer, mtl4_queue);
 
    uint32_t created_image_count = 0;
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
@@ -1126,9 +1134,13 @@ fail_init_images:
    for (uint32_t i = 0; i < created_image_count; i++)
       wsi_metal_destroy_image(chain, &chain->images[i]);
 
+   if (mtl4_queue)
+      wsi_metal_layer_remove_queue_resident(chain->layer, mtl4_queue);
+
    wsi_metal_release_present_info(chain->present_info);
 
 fail_present_info:
+   wsi_metal_layer_release(chain->layer);
    wsi_swapchain_finish(&chain->base);
 
 fail_chain_alloc:
@@ -1201,12 +1213,23 @@ wsi_CreateMetalSurfaceEXT(
    if (surface == NULL)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+   assert(pCreateInfo->pLayer);
    surface->base.platform = VK_ICD_WSI_PLATFORM_METAL;
-   surface->pLayer = pCreateInfo->pLayer;
-   assert(surface->pLayer);
+   surface->pLayer = wsi_metal_layer_retain(pCreateInfo->pLayer);
 
    *pSurface = VkIcdSurfaceBase_to_handle(&surface->base);
    return VK_SUCCESS;
+}
+
+void
+wsi_metal_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
+                          const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(vk_instance, instance, _instance);
+   VkIcdSurfaceMetal *surface = (VkIcdSurfaceMetal *)icd_surface;
+
+   wsi_metal_layer_release(surface->pLayer);
+   vk_free2(&instance->alloc, pAllocator, surface);
 }
 
 static VkResult
