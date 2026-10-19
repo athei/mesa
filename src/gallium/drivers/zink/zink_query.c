@@ -879,7 +879,7 @@ update_qbo(struct zink_context *ctx, struct zink_query *q)
                                     * - Chapter 18. Queries
                                     */
                                     VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-         if (!is_timestamp)
+         if (!is_timestamp && i == 0)
             q->curr_qbo->num_results += num_merged_copies;
          start_offset += num_merged_copies;
       }
@@ -1263,6 +1263,18 @@ zink_query_renderpass_suspend(struct zink_context *ctx)
    suspend_queries(ctx, true);
 }
 
+static bool
+have_queries_started_outside_rp(struct zink_context *ctx)
+{
+   set_foreach(&ctx->bs->active_queries, entry) {
+      struct zink_query *query = (void*)entry->key;
+      if (query->active && !query->suspended && !is_time_query(query) &&
+          !query->started_in_rp)
+         return true;
+   }
+   return false;
+}
+
 void
 zink_query_update_gs_states(struct zink_context *ctx)
 {
@@ -1286,11 +1298,13 @@ zink_query_update_gs_states(struct zink_context *ctx)
       query = ctx->vertices_query;
       struct zink_query_start *last_start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
       assert(query->active);
-      if (last_start->was_line_loop != ctx->was_line_loop) {
+      if (query->has_draws && last_start->was_line_loop != ctx->was_line_loop) {
          suspendall = true;
       }
    }
    if (suspendall) {
+     if (ctx->in_rp && have_queries_started_outside_rp(ctx))
+        zink_batch_no_rp(ctx);
      zink_suspend_queries(ctx);
      zink_resume_queries(ctx);
    }
@@ -1486,10 +1500,14 @@ zink_get_query_result_resource(struct pipe_context *pctx,
     * - Chapter 18. Queries
     */
    size_flags |= VK_QUERY_RESULT_WAIT_BIT;
+   struct zink_query_start *last_start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
+   bool halve_line_loop = query->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE &&
+                          query->index == PIPE_STAT_QUERY_IA_VERTICES &&
+                          last_start->was_line_loop;
    if (!is_time_query(query) && !is_bool_query(query)) {
       if (num_queries == 1 && !is_emulated_primgen(query) &&
                               query->type != PIPE_QUERY_PRIMITIVES_EMITTED &&
-                              !is_bool_query(query)) {
+                              !is_bool_query(query) && !halve_line_loop) {
          if (size_flags == VK_QUERY_RESULT_64_BIT) {
             if (query->needs_update)
                update_qbo(ctx, query);

@@ -2548,6 +2548,8 @@ zink_set_sampler_views(struct pipe_context *pctx,
          struct zink_sampler_view *b = zink_sampler_view(pview);
 
          if (a == b) {
+            if (b && b->cube_array)
+               ctx->di.cubes[shader_type] |= BITFIELD_BIT(start_slot + i);
             continue;
          }
 
@@ -2639,6 +2641,7 @@ zink_set_sampler_views(struct pipe_context *pctx,
    for (unsigned i = 0; i < unbind_num_trailing_slots; ++i) {
       unsigned slot = start_slot + num_views + i;
       update |= !!ctx->sampler_views[shader_type][slot];
+      ctx->di.cubes[shader_type] &= ~BITFIELD_BIT(slot);
       unbind_samplerview(ctx, shader_type, slot);
       pipe_sampler_view_reference(&ctx->sampler_views[shader_type][slot], NULL);
       update_descriptor_state_sampler(ctx, shader_type, slot, NULL);
