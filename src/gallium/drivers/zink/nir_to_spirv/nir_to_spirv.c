@@ -36,8 +36,6 @@
 
 static const SpvFPFastMathModeMask default_fp_mode =
    SpvFPFastMathModeNSZMask |
-   SpvFPFastMathModeNotInfMask |
-   SpvFPFastMathModeNotNaNMask |
    SpvFPFastMathModeAllowRecipMask |
    SpvFPFastMathModeAllowContractMask |
    SpvFPFastMathModeAllowReassocMask |
@@ -2313,12 +2311,6 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
 
       if (!nir_alu_instr_is_signed_zero_preserve(alu))
          fp_mode |= SpvFPFastMathModeNSZMask;
-
-      if (!nir_alu_instr_is_inf_preserve(alu))
-         fp_mode |= SpvFPFastMathModeNotInfMask;
-
-      if (!nir_alu_instr_is_nan_preserve(alu))
-         fp_mode |= SpvFPFastMathModeNotNaNMask;
 
       if (!nir_alu_instr_no_contract(alu))
          fp_mode |= SpvFPFastMathModeAllowContractMask;
