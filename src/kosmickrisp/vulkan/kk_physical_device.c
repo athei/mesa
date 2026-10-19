@@ -202,6 +202,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_shader_replicated_composites = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
+      .EXT_transform_feedback = true,
 #ifdef KK_USE_WSI_PLATFORM
       .EXT_swapchain_maintenance1 = true,
 #endif
@@ -464,6 +465,10 @@ kk_get_device_features(
       .deviceGeneratedCommands =
          supported_extensions->EXT_device_generated_commands,
       .dynamicGeneratedPipelineLayout = false,
+
+      /* VK_EXT_transform_feedback */
+      .transformFeedback = supported_extensions->EXT_transform_feedback,
+      .geometryStreams = supported_extensions->EXT_transform_feedback,
 
       /* VK_EXT_extended_dynamic_state3 */
       .extendedDynamicState3DepthClampEnable = true,
@@ -905,9 +910,9 @@ kk_get_device_properties(
       .maxTransformFeedbackStreams = 4,
       .maxTransformFeedbackBuffers = 4,
       .maxTransformFeedbackBufferSize = UINT32_MAX,
-      .maxTransformFeedbackStreamDataSize = 2048,
+      .maxTransformFeedbackStreamDataSize = 512,
       .maxTransformFeedbackBufferDataSize = 512,
-      .maxTransformFeedbackBufferDataStride = 2048,
+      .maxTransformFeedbackBufferDataStride = 512,
       .transformFeedbackQueries = true,
       .transformFeedbackStreamsLinesTriangles = false,
       .transformFeedbackRasterizationStreamSelect = true,

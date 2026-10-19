@@ -63,6 +63,12 @@ libkk_write_u32(global uint32_t *address, uint32_t value)
 }
 
 KERNEL(1)
+libkk_copy_u32(global uint32_t *dst, global uint32_t *src)
+{
+   *dst = *src;
+}
+
+KERNEL(1)
 libkk_copy_queries(global uint32_t *availability, global uint64_t *results,
                    global uint16_t *oq_index, uint64_t dst_addr,
                    uint64_t dst_stride, uint32_t first_query,
