@@ -8,8 +8,12 @@
 
 #include "vk_format.h"
 
+#import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#include <objc/runtime.h>
+
+#include "util/macros.h"
 
 void
 wsi_metal_layer_size(const CAMetalLayer *metal_layer,
@@ -135,18 +139,67 @@ get_color_space_info(VkColorSpaceKHR color_space, CGColorSpaceRef *cg_color_spac
    return VK_SUCCESS;
 }
 
-void
-wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
-                              bool enable_immediate)
+/* The highest refresh rate in Hz of the screen showing the layer, or 0 when
+ * no screen reports one. Main thread only: the walk goes through the view
+ * and the window that host the layer, which only the main thread may touch.
+ *
+ * AppKit is looked up rather than linked. A process that never loaded it has
+ * no views and no screens to ask.
+ */
+static uint32_t
+screen_max_refresh_rate(const CAMetalLayer *metal_layer)
 {
-   metal_layer.displaySyncEnabled = !enable_immediate;
+   Class view_class = objc_getClass("NSView");
+   Class screen_class = objc_getClass("NSScreen");
+   if (!view_class || !screen_class)
+      return 0;
+
+   /* A layer-backed view is the delegate of its layer. The layer we got may
+    * also be a sublayer of one. */
+   NSScreen *screen = nil;
+   for (CALayer *layer = (CALayer *)metal_layer; layer; layer = layer.superlayer) {
+      id delegate = layer.delegate;
+      if ([delegate isKindOfClass:view_class]) {
+         screen = ((NSView *)delegate).window.screen;
+         break;
+      }
+   }
+   /* A layer outside any window, or a window entirely offscreen. */
+   if (!screen)
+      screen = [screen_class mainScreen];
+   if (!screen)
+      return 0;
+
+   NSInteger rate = screen.maximumFramesPerSecond;
+   return rate > 0 ? (uint32_t)MIN2(rate, 1000) : 0;
+}
+
+void
+wsi_metal_layer_query_refresh_rate(const CAMetalLayer *metal_layer,
+                                   void (*refresh_rate_handler)(void *, uint32_t),
+                                   void *data)
+{
+   if ([NSThread isMainThread]) {
+      @autoreleasepool {
+         refresh_rate_handler(data, screen_max_refresh_rate(metal_layer));
+      }
+      return;
+   }
+
+   CAMetalLayer *layer = [(CAMetalLayer *)metal_layer retain];
+   dispatch_async(dispatch_get_main_queue(), ^{
+      @autoreleasepool {
+         refresh_rate_handler(data, screen_max_refresh_rate(layer));
+      }
+      [layer release];
+   });
 }
 
 VkResult
 wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
    uint32_t width, uint32_t height, uint32_t image_count,
    VkFormat format, VkColorSpaceKHR color_space,
-   bool enable_opaque, bool enable_immediate, bool framebuffer_only)
+   bool enable_opaque, bool framebuffer_only)
 {
    @autoreleasepool {
       MTLPixelFormat metal_format;
@@ -170,7 +223,14 @@ wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
       metal_layer.maximumDrawableCount = image_count;
       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
       metal_layer.opaque = enable_opaque;
-      metal_layer.displaySyncEnabled = !enable_immediate;
+      /* Display sync stays off in every present mode. FIFO presents are
+       * paced with a minimum duration instead (wsi_metal_layer_present).
+       * When the layer goes straight to the display (fullscreen), that lets
+       * a variable refresh rate panel follow an application that renders
+       * below its maximum rate rather than holding each frame to the next
+       * vsync; in a window the compositor still shows frames on the panel's
+       * refresh. */
+      metal_layer.displaySyncEnabled = NO;
       metal_layer.pixelFormat = metal_format;
 
       metal_layer.colorspace = cg_color_space;
@@ -284,13 +344,15 @@ wsi_metal_release_drawable(CAMetalDrawable *drawable_ptr)
 
 void
 wsi_metal_layer_add_presented_handler(CAMetalDrawable *drawable_ptr,
-                                      void (*presented_handler)(void *, uint64_t),
-                                      void *present_info_ptr, uint64_t present_id)
+                                      void (*presented_handler)(void *, uint64_t,
+                                                                bool, double),
+                                      void *data, uint64_t present_id,
+                                      bool paced)
 {
    @autoreleasepool {
       id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
       [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
-         presented_handler(present_info_ptr, present_id);
+         presented_handler(data, present_id, paced, mtlDrwbl.presentedTime);
       }];
    }
 }
@@ -327,7 +389,8 @@ wsi_destroy_metal_layer_blit_context(struct wsi_metal_layer_blit_context *contex
 void
 wsi_metal_layer_blit_and_present(struct wsi_metal_layer_blit_context *context,
    CAMetalDrawable **drawable_ptr, void *buffer,
-   uint32_t width, uint32_t height, uint32_t row_pitch)
+   uint32_t width, uint32_t height, uint32_t row_pitch,
+   double min_duration)
 {
    @autoreleasepool {
       id<CAMetalDrawable> drawable = [(id<CAMetalDrawable>)*drawable_ptr autorelease];
@@ -351,7 +414,10 @@ wsi_metal_layer_blit_and_present(struct wsi_metal_layer_blit_context *context,
          destinationLevel:0
          destinationOrigin:MTLOriginMake(0, 0, 0)];
       [commandEncoder endEncoding];
-      [commandBuffer presentDrawable:drawable];
+      if (min_duration > 0.0)
+         [commandBuffer presentDrawable:drawable afterMinimumDuration:min_duration];
+      else
+         [commandBuffer presentDrawable:drawable];
       [commandBuffer commit];
 
       *drawable_ptr = nil;
@@ -359,11 +425,16 @@ wsi_metal_layer_blit_and_present(struct wsi_metal_layer_blit_context *context,
 }
 
 void
-wsi_metal_layer_present(CAMetalDrawable **drawable_ptr)
+wsi_metal_layer_present(CAMetalDrawable **drawable_ptr, double min_duration)
 {
    @autoreleasepool {
       id<CAMetalDrawable> drawable = [(id<CAMetalDrawable>)*drawable_ptr autorelease];
-      [drawable present];
+      /* The duration counts from when the previous drawable of the layer was
+       * shown. */
+      if (min_duration > 0.0)
+         [drawable presentAfterMinimumDuration:min_duration];
+      else
+         [drawable present];
 
       *drawable_ptr = nil;
    }
