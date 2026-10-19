@@ -634,9 +634,10 @@ zink_init_shader_caps(struct zink_screen *screen)
       caps->fp16_derivatives = false;
 
       caps->fp16 =
-         screen->info.feats12.shaderFloat16 ||
-         (screen->info.have_KHR_shader_float16_int8 &&
-          screen->info.shader_float16_int8_feats.shaderFloat16);
+         i == MESA_SHADER_FRAGMENT &&
+         (screen->info.feats12.shaderFloat16 ||
+          (screen->info.have_KHR_shader_float16_int8 &&
+           screen->info.shader_float16_int8_feats.shaderFloat16));
       caps->fp16_no_denorms = caps->fp16 && !screen->info.props12.shaderDenormPreserveFloat16
          && screen->info.props12.shaderDenormFlushToZeroFloat16;
       caps->glsl_16bit_load_dst = true;
@@ -1133,7 +1134,8 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    /* Sparse texture */
    caps->max_sparse_texture_size =
-      screen->info.feats.features.sparseResidencyImage2D ?
+      screen->info.feats.features.sparseResidencyImage2D &&
+      screen->info.feats.features.sparseResidencyImage3D ?
       caps->max_texture_2d_size : 0;
    caps->max_sparse_3d_texture_size =
       screen->info.feats.features.sparseResidencyImage3D ?
@@ -1144,9 +1146,11 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->sparse_texture_full_array_cube_mipmaps =
       screen->info.feats.features.sparseResidencyImage2D;
    caps->query_sparse_texture_residency =
+      caps->max_sparse_texture_size &&
       screen->info.feats.features.sparseResidency2Samples &&
       screen->info.feats.features.shaderResourceResidency;
    caps->clamp_sparse_texture_lod =
+      caps->max_sparse_texture_size &&
       screen->info.feats.features.shaderResourceMinLod &&
       screen->info.feats.features.sparseResidency2Samples &&
       screen->info.feats.features.shaderResourceResidency;

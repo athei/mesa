@@ -557,6 +557,18 @@ emit_dynamic_state(struct zink_context *ctx, bool pipeline_changed, unsigned num
    atoms &= ~skip_atoms;
    if (atoms)
       emit_dynamic_atoms<DYNAMIC_STATE>(ctx, atoms, num_viewports);
+
+   /* Without EDS3 the stipple factor and pattern are dynamic state of only
+    * the pipelines that enable line stipple (zink_create_gfx_pipeline), so
+    * they are set again whenever such a pipeline is bound */
+   if (DYNAMIC_STATE < ZINK_DYNAMIC_STATE3 && !uses_shobj &&
+       (BATCH_CHANGED || pipeline_changed ||
+        (atoms & BITFIELD_BIT(ZINK_ATOM_RASTERIZER))) &&
+       ctx->rast_state->hw_state.line_stipple_enable) {
+      VKCTX(CmdSetLineStippleEXT)(ctx->bs->cmdbuf,
+                                  ctx->rast_state->base.line_stipple_factor,
+                                  ctx->rast_state->base.line_stipple_pattern);
+   }
 }
 
 template <zink_dynamic_state DYNAMIC_STATE>

@@ -162,6 +162,15 @@ zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct 
    if (screen->device_lost)
       return true;
 
+   /* A timeout that ends past the range of the clock, like the INT64_MAX
+    * that some applications pass to glClientWaitSync to wait forever, gets
+    * OS_TIMEOUT_INFINITE as its absolute time, which is -1 as an int64_t and
+    * so already over: wait without a timeout instead.
+    */
+   if (timeout_ns &&
+       (uint64_t)os_time_get_absolute_timeout(timeout_ns) == OS_TIMEOUT_INFINITE)
+      timeout_ns = OS_TIMEOUT_INFINITE;
+
    if (pctx && mfence->deferred_ctx == pctx) {
       if (mfence->fence == ctx->deferred_fence &&
           zink_batch_state(mfence->fence)->usage.submit_count == mfence->submit_count) {

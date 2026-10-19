@@ -533,7 +533,7 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
       goto out;
 
    if (update_swapchain(screen, cdt, width, height) != VK_SUCCESS)
-      goto out;
+      goto out_surface;
 
    simple_mtx_lock(&screen->dt_lock);
    switch (cdt->type) {
@@ -584,6 +584,12 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
    return cdt;
 
 //moar cleanup
+out_surface:
+   /* a swapchain whose image list could not be allocated has no images */
+   if (cdt->swapchain && !cdt->swapchain->images)
+      cdt->swapchain->num_images = 0;
+   destroy_swapchain(screen, cdt->swapchain);
+   VKSCR(DestroySurfaceKHR)(screen->instance, cdt->surface, NULL);
 out:
    FREE(cdt);
    return NULL;

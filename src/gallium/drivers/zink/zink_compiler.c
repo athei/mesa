@@ -117,6 +117,69 @@ fields[member_idx].offset = offsetof(struct zink_gfx_push_constant, field);
 }
 
 static bool
+lower_single_invocation_subgroup_instr(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *val;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_subgroup_invocation:
+      val = nir_imm_intN_t(b, 0, intr->def.bit_size);
+      break;
+   case nir_intrinsic_elect:
+      val = nir_imm_true(b);
+      break;
+   case nir_intrinsic_ballot: {
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      comps[0] = nir_b2iN(b, intr->src[0].ssa, intr->def.bit_size);
+      for (unsigned i = 1; i < intr->def.num_components; i++)
+         comps[i] = nir_imm_intN_t(b, 0, intr->def.bit_size);
+      val = nir_vec(b, comps, intr->def.num_components);
+      break;
+   }
+   case nir_intrinsic_read_invocation:
+   case nir_intrinsic_read_first_invocation:
+   case nir_intrinsic_shuffle:
+   case nir_intrinsic_shuffle_xor:
+   case nir_intrinsic_shuffle_up:
+   case nir_intrinsic_shuffle_down:
+   case nir_intrinsic_rotate:
+   case nir_intrinsic_quad_broadcast:
+   case nir_intrinsic_quad_swap_horizontal:
+   case nir_intrinsic_quad_swap_vertical:
+   case nir_intrinsic_quad_swap_diagonal:
+   case nir_intrinsic_reduce:
+   case nir_intrinsic_inclusive_scan:
+      val = intr->src[0].ssa;
+      break;
+   case nir_intrinsic_quad_vote_any:
+   case nir_intrinsic_quad_vote_all:
+      val = intr->src[0].ssa;
+      break;
+   case nir_intrinsic_exclusive_scan: {
+      nir_const_value ident =
+         nir_alu_binop_identity(nir_intrinsic_reduction_op(intr), intr->def.bit_size);
+      nir_def *c = nir_build_imm(b, 1, intr->def.bit_size, &ident);
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < intr->def.num_components; i++)
+         comps[i] = c;
+      val = nir_vec(b, comps, intr->def.num_components);
+      break;
+   }
+   default:
+      return false;
+   }
+   nir_def_replace(&intr->def, val);
+   return true;
+}
+
+static bool
+lower_single_invocation_subgroups(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader, lower_single_invocation_subgroup_instr,
+                                     nir_metadata_control_flow, NULL);
+}
+
+static bool
 lower_basevertex_instr(nir_builder *b, nir_intrinsic_instr *instr, void *data)
 {
    if (instr->intrinsic != nir_intrinsic_load_base_vertex)
@@ -5869,7 +5932,9 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
       subgroup_options.ballot_bit_size = 32;
       subgroup_options.ballot_components = 4;
       subgroup_options.lower_subgroup_masks = true;
-      if (!(screen->info.subgroup.supportedStages & mesa_to_vk_shader_stage(clamp_stage(&nir->info)))) {
+      bool single_invocation =
+         !(screen->info.subgroup.supportedStages & mesa_to_vk_shader_stage(clamp_stage(&nir->info)));
+      if (single_invocation) {
          subgroup_options.subgroup_size = 1;
          subgroup_options.lower_vote_trivial = true;
       }
@@ -5880,6 +5945,8 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
       subgroup_options.lower_shuffle = !(screen->base.caps.shader_subgroup_supported_features & PIPE_SHADER_SUBGROUP_FEATURE_SHUFFLE);
 
       NIR_PASS(_, nir, nir_lower_subgroups, &subgroup_options);
+      if (single_invocation)
+         NIR_PASS(_, nir, lower_single_invocation_subgroups);
    }
 
    optimize_nir(nir, NULL, true);
