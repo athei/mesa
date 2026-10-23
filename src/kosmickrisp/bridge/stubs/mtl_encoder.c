@@ -185,6 +185,11 @@ mtl_set_cull_mode(mtl_render_encoder *encoder, enum mtl_cull_mode mode)
 }
 
 void
+mtl_set_triangle_fill_mode(mtl_render_encoder *encoder, bool lines)
+{
+}
+
+void
 mtl_set_visibility_result_mode(mtl_render_encoder *encoder,
                                enum mtl_visibility_result_mode mode,
                                size_t offset)

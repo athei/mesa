@@ -101,6 +101,9 @@ void mtl_set_front_face_winding(mtl_render_encoder *encoder,
 
 void mtl_set_cull_mode(mtl_render_encoder *encoder, enum mtl_cull_mode mode);
 
+/* Rasterizes the edges of triangles as lines, or fills them */
+void mtl_set_triangle_fill_mode(mtl_render_encoder *encoder, bool lines);
+
 void mtl_set_visibility_result_mode(mtl_render_encoder *encoder,
                                     enum mtl_visibility_result_mode mode,
                                     size_t offset);

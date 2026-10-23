@@ -36,16 +36,16 @@
  * slots the linked stages leave free.
  */
 
-/* Loads from the struct kk_line_stipple_data the root table points to */
-static nir_def *
-load_stipple_data(nir_builder *b, unsigned num_components, unsigned offset_B,
-                  nir_def *index_B)
+/* Loads from the struct kk_raster_data the root table points to */
+nir_def *
+kk_load_raster_data(nir_builder *b, unsigned num_components, unsigned offset_B,
+                    nir_def *index_B)
 {
    nir_def *root = nir_load_buffer_ptr_kk(b, 1, 64, .binding = 0);
    nir_def *data = nir_build_load_global_constant(
       b, 1, 64,
       nir_iadd_imm(b, root,
-                   offsetof(struct kk_root_descriptor_table, draw.line_stipple)),
+                   offsetof(struct kk_root_descriptor_table, draw.raster_data)),
       .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
    nir_def *offset = nir_imm_int(b, offset_B);
    if (index_B)
@@ -85,9 +85,8 @@ store_window_position(nir_builder *b, const struct output_state *state)
    w = nir_bcsel(b, nir_feq_imm(b, w, 0.0f), nir_imm_float(b, 1e-20f), w);
    nir_def *ndc = nir_fdiv(b, nir_trim_vector(b, pos, 2), w);
    nir_def *xform =
-      load_stipple_data(b, 4,
-                        offsetof(struct kk_line_stipple_data, viewport_xform),
-                        nir_imul_imm(b, viewport, 4 * sizeof(float)));
+      kk_load_raster_data(b, 4, offsetof(struct kk_raster_data, viewport_xform),
+                          nir_imul_imm(b, viewport, 4 * sizeof(float)));
    nir_def *window = nir_ffma(b, ndc, nir_channels(b, xform, 0x3),
                               nir_channels(b, xform, 0xc));
 
@@ -209,8 +208,8 @@ kk_nir_lower_line_stipple_fs(nir_shader *nir, unsigned start_slot,
                             nir_imm_float(&b, 0.0f)),
                    nir_imm_float(&b, 16777216.0f)));
 
-   nir_def *stipple = load_stipple_data(
-      &b, 1, offsetof(struct kk_line_stipple_data, stipple), NULL);
+   nir_def *stipple = kk_load_raster_data(
+      &b, 1, offsetof(struct kk_raster_data, stipple), NULL);
    nir_def *factor = nir_umax(&b, nir_ushr_imm(&b, stipple, 16),
                               nir_imm_int(&b, 1));
    nir_def *bit = nir_iand_imm(&b, nir_udiv(&b, counter, factor), 15);

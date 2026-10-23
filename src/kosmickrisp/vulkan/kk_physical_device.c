@@ -236,6 +236,9 @@ kk_get_device_features(
       .depthClamp = true,
       .drawIndirectFirstInstance = true,
       .dualSrcBlend = true,
+      /* Lines through Metal's fill mode, points through a geometry shader,
+       * see kk_create_polygon_point_gs */
+      .fillModeNonSolid = true,
       .fragmentStoresAndAtomics = true,
       .fullDrawIndexUint32 = true,
       .geometryShader = true,
@@ -861,7 +864,7 @@ kk_get_device_properties(
       .earlyFragmentMultisampleCoverageAfterSampleCounting = true,
       .earlyFragmentSampleMaskTestBeforeSampleCounting = false,
       .depthStencilSwizzleOneSupport = true,
-      .polygonModePointSize = false,
+      .polygonModePointSize = true,
       .nonStrictSinglePixelWideLinesUseParallelogram = false,
       .nonStrictWideLinesUseParallelogram = false,
 

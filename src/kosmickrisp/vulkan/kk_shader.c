@@ -111,6 +111,8 @@ struct kk_vs_key {
    enum mesa_prim prim;
    struct vk_vertex_input_state vi;
    bool line_stipple;
+   /* Adds a GS, see kk_create_polygon_point_gs */
+   bool polygon_points;
 };
 
 static enum mesa_prim
@@ -129,6 +131,8 @@ kk_populate_vs_key(struct kk_vs_key *key,
    key->prim = kk_assembled_prim(state);
    key->vi = *state->vi;
    key->line_stipple = state->rs && state->rs->line.stipple.enable;
+   key->polygon_points =
+      state->rs && state->rs->polygon_mode == VK_POLYGON_MODE_POINT;
 }
 
 struct kk_fs_key {
@@ -2569,6 +2573,227 @@ kk_create_passthrough_gs(struct kk_device *dev, nir_shader *prev,
    return gs;
 }
 
+/* Whether the pipeline draws triangles with VK_POLYGON_MODE_POINT, which is
+ * static state here. Only the stages before a GS are looked at, the caller
+ * checks for a GS. */
+static bool
+kk_draws_polygons_as_points(const struct vk_graphics_pipeline_state *state,
+                            const struct vk_shader_compile_info *infos,
+                            uint32_t count)
+{
+   if (!state->rs || state->rs->polygon_mode != VK_POLYGON_MODE_POINT)
+      return false;
+
+   enum tess_primitive_mode mode = TESS_PRIMITIVE_UNSPECIFIED;
+   bool tess = false, point_mode = false;
+   for (uint32_t i = 0; i < count; i++) {
+      const nir_shader *nir = infos[i].nir;
+      if (nir->info.stage == MESA_SHADER_TESS_CTRL ||
+          nir->info.stage == MESA_SHADER_TESS_EVAL) {
+         tess = true;
+         if (nir->info.tess._primitive_mode != TESS_PRIMITIVE_UNSPECIFIED)
+            mode = nir->info.tess._primitive_mode;
+         point_mode |= nir->info.tess.point_mode;
+      }
+   }
+
+   if (tess)
+      return mode != TESS_PRIMITIVE_ISOLINES && !point_mode;
+
+   return state->ia && u_reduced_prim(kk_assembled_prim(state)) ==
+                          MESA_PRIM_TRIANGLES;
+}
+
+/* VK_POLYGON_MODE_POINT, which Metal does not have: a GS after the last
+ * vertex stage emits the vertices of each triangle as points, with their
+ * PointSize or 1.0. The triangle is culled first, by its facing in window
+ * coordinates, from the sign of the determinant of its (x, y, w), which also
+ * gives the facing of the part in front of the eye when it crosses w = 0, and
+ * the cull mode and front face of struct kk_raster_data. Flat outputs come
+ * from the triangle's provoking vertex, as Vulkan takes them for all of its
+ * points. The fragment shader's flat inputs say which are flat.
+ *
+ * Depth bias is not applied to the points, which Metal only applies to
+ * triangles.
+ */
+static nir_shader *
+kk_create_polygon_point_gs(struct kk_device *dev, nir_shader *prev,
+                           nir_shader *fs)
+{
+   struct poly_passthrough_gs_key *key =
+      calloc(1, poly_passthrough_gs_key_size(0));
+   if (key == NULL)
+      return NULL;
+   kk_gather_output_types(prev, key);
+
+   uint8_t flat[NUM_TOTAL_VARYING_SLOTS] = {0};
+   if (fs)
+      kk_gather_flat_inputs(fs, flat);
+
+   nir_builder bld = nir_builder_init_simple_shader(
+      MESA_SHADER_GEOMETRY,
+      kk_get_nir_options(&kk_device_physical(dev)->vk, MESA_SHADER_GEOMETRY,
+                         NULL),
+      "kk polygon point gs");
+   nir_builder *b = &bld;
+   nir_shader *s = b->shader;
+
+   uint64_t outputs = prev->info.outputs_written &
+                      ~(VARYING_BIT_BOUNDING_BOX0 | VARYING_BIT_BOUNDING_BOX1);
+   s->info.inputs_read = outputs;
+   s->info.clip_distance_array_size = prev->info.clip_distance_array_size;
+   s->info.gs.input_primitive = MESA_PRIM_TRIANGLES;
+   s->info.gs.output_primitive = MESA_PRIM_POINTS;
+   s->info.gs.vertices_in = 3;
+   s->info.gs.vertices_out = 3;
+   s->info.gs.invocations = 1;
+   s->info.gs.active_stream_mask = 1;
+
+   nir_def *pos[3];
+   for (unsigned i = 0; i < 3; i++) {
+      pos[i] = nir_load_per_vertex_input(
+         b, 4, 32, nir_imm_int(b, i), nir_imm_int(b, 0),
+         .io_semantics.location = VARYING_SLOT_POS,
+         .io_semantics.num_slots = 1, .dest_type = nir_type_float32);
+   }
+
+   nir_def *viewport = nir_imm_int(b, 0);
+   if (outputs & VARYING_BIT_VIEWPORT) {
+      viewport = nir_load_per_vertex_input(
+         b, 1, 32, nir_imm_int(b, 0), nir_imm_int(b, 0),
+         .io_semantics.location = VARYING_SLOT_VIEWPORT,
+         .io_semantics.num_slots = 1, .dest_type = nir_type_uint32);
+      viewport = nir_umin(b, viewport, nir_imm_int(b, KK_MAX_VIEWPORTS - 1));
+   }
+   nir_def *scale = kk_load_raster_data(
+      b, 2, offsetof(struct kk_raster_data, viewport_xform),
+      nir_imul_imm(b, viewport, 4 * sizeof(float)));
+
+   /* det(x, y, w) is the window area times w0 w1 w2 / (sx sy) */
+   nir_def *x[3], *y[3], *w[3];
+   for (unsigned i = 0; i < 3; i++) {
+      x[i] = nir_channel(b, pos[i], 0);
+      y[i] = nir_channel(b, pos[i], 1);
+      w[i] = nir_channel(b, pos[i], 3);
+   }
+   nir_def *det = nir_fadd(
+      b,
+      nir_fsub(b,
+               nir_fmul(b, x[0], nir_fsub(b, nir_fmul(b, y[1], w[2]),
+                                          nir_fmul(b, y[2], w[1]))),
+               nir_fmul(b, y[0], nir_fsub(b, nir_fmul(b, x[1], w[2]),
+                                          nir_fmul(b, x[2], w[1])))),
+      nir_fmul(b, w[0], nir_fsub(b, nir_fmul(b, x[1], y[2]),
+                                 nir_fmul(b, x[2], y[1]))));
+   nir_def *area = nir_fmul(
+      b, det, nir_fmul(b, nir_channel(b, scale, 0), nir_channel(b, scale, 1)));
+
+   /* The spec's a = -area / 2: counter-clockwise for area < 0. A triangle
+    * without area counts as front-facing. */
+   nir_def *front_ccw = nir_ine_imm(
+      b, kk_load_raster_data(b, 1, offsetof(struct kk_raster_data, front_ccw),
+                             NULL),
+      0);
+   nir_def *ccw = nir_flt_imm(b, area, 0.0f);
+   nir_def *front =
+      nir_ior(b, nir_feq_imm(b, area, 0.0f), nir_ieq(b, ccw, front_ccw));
+   nir_def *cull = kk_load_raster_data(
+      b, 1, offsetof(struct kk_raster_data, cull_mode), NULL);
+   nir_def *culled = nir_bcsel(b, front,
+                               nir_test_mask(b, cull, VK_CULL_MODE_FRONT_BIT),
+                               nir_test_mask(b, cull, VK_CULL_MODE_BACK_BIT));
+
+   /* Clip and cull distances are compact arrays, each in its own slots, or
+    * the cull distances after the clip distances in the clip slots when the
+    * two arrays were combined. A triangle with all three vertices on the
+    * negative side of one cull plane is culled, and the points get no cull
+    * distances: Vulkan culls the triangle, not its points. */
+   const unsigned clip = prev->info.clip_distance_array_size;
+   const unsigned cull_count = prev->info.cull_distance_array_size;
+   const bool combined =
+      cull_count > 0 &&
+      !(outputs & (VARYING_BIT_CULL_DIST0 | VARYING_BIT_CULL_DIST1));
+   const unsigned clip_in_slots = combined ? clip + cull_count : clip;
+   for (unsigned j = 0; j < cull_count; j++) {
+      unsigned e = (combined ? clip : 0) + j;
+      nir_def *all_out = nir_imm_true(b);
+      for (unsigned i = 0; i < 3; i++) {
+         nir_def *d = nir_load_per_vertex_input(
+            b, 1, 32, nir_imm_int(b, i), nir_imm_int(b, e / 4),
+            .component = e % 4,
+            .io_semantics.location =
+               combined ? VARYING_SLOT_CLIP_DIST0 : VARYING_SLOT_CULL_DIST0,
+            .io_semantics.num_slots = combined ? clip_in_slots : cull_count,
+            .dest_type = nir_type_float32);
+         all_out = nir_iand(b, all_out, nir_flt_imm(b, d, 0.0f));
+      }
+      culled = nir_ior(b, culled, all_out);
+   }
+
+   uint64_t copied =
+      outputs & ~(VARYING_BIT_CULL_DIST0 | VARYING_BIT_CULL_DIST1);
+   if (clip <= 4)
+      copied &= ~VARYING_BIT_CLIP_DIST1;
+   if (clip == 0)
+      copied &= ~VARYING_BIT_CLIP_DIST0;
+   s->info.outputs_written = copied | VARYING_BIT_PSIZ;
+   s->info.cull_distance_array_size = 0;
+
+   nir_def *provoking = nir_bcsel(b, nir_ine_imm(b, nir_load_provoking_last(b), 0),
+                                  nir_imm_int(b, 2), nir_imm_int(b, 0));
+
+   nir_push_if(b, nir_inot(b, culled));
+   for (unsigned i = 0; i < 3; i++) {
+      u_foreach_bit64(loc, copied) {
+         nir_io_semantics in_sem = {
+            .location = loc,
+            .num_slots = 1,
+         };
+         nir_io_semantics out_sem = in_sem;
+         nir_def *offset = nir_imm_int(b, 0);
+         unsigned comps = key->output_components[loc];
+
+         /* The clip distances alone, from the combined input array */
+         if (loc == VARYING_SLOT_CLIP_DIST0 || loc == VARYING_SLOT_CLIP_DIST1) {
+            unsigned slot = loc - VARYING_SLOT_CLIP_DIST0;
+            in_sem.location = out_sem.location = VARYING_SLOT_CLIP_DIST0;
+            in_sem.num_slots = clip_in_slots;
+            out_sem.num_slots = clip;
+            offset = nir_imm_int(b, slot);
+            comps = MIN2(clip - slot * 4, 4);
+         }
+
+         nir_alu_type type = key->output_types[loc];
+         unsigned bit_size = nir_alu_type_get_type_size(type);
+         nir_def *vertex = flat[loc] ? provoking : nir_imm_int(b, i);
+         nir_def *val = nir_load_per_vertex_input(
+            b, comps, bit_size, vertex, offset, .io_semantics = in_sem,
+            .dest_type = type);
+         for (unsigned c = 0; c < comps; ++c) {
+            nir_store_output(b, nir_channel(b, val, c), offset,
+                             .io_semantics = out_sem, .src_type = type,
+                             .component = c);
+         }
+      }
+
+      if (!(outputs & VARYING_BIT_PSIZ)) {
+         nir_store_output(b, nir_imm_float(b, 1.0f), nir_imm_int(b, 0),
+                          .io_semantics.location = VARYING_SLOT_PSIZ,
+                          .io_semantics.num_slots = 1,
+                          .src_type = nir_type_float32);
+      }
+      nir_emit_vertex(b, 0);
+   }
+   nir_pop_if(b, NULL);
+   free(key);
+
+   s->info.io_lowered = true;
+   nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
+   NIR_PASS(_, s, nir_shader_intrinsics_pass, kk_fold_io_offset,
+            nir_metadata_control_flow, NULL);
+   return s;
+}
+
 /* Whether the pipeline rasterizes lines with line stipple. The stipple is
  * only allowed for Bresenham lines, which are all the stippled lines this
  * driver has. nir holds the linked stages, the fragment shader last. */
@@ -2622,7 +2847,10 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
    nir_shader *nir_shaders[shader_count + 2u];
    struct kk_shader *shaders[shader_count + 2u];
 
+   /* The stage an internal GS follows: one that writes transform feedback, or
+    * one that draws polygons as points */
    int xfb_stage = -1;
+   bool point_gs = false;
    if (state) {
       bool has_gs = false;
       for (uint32_t i = 0u; i < shader_count; ++i) {
@@ -2633,11 +2861,21 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
             xfb_stage = i;
       }
 
-      if (has_gs || xfb_stage < 0 || infos[xfb_stage].nir->xfb_info == NULL ||
-          infos[xfb_stage].nir->xfb_info->output_count == 0)
+      bool xfb = xfb_stage >= 0 && infos[xfb_stage].nir->xfb_info &&
+                 infos[xfb_stage].nir->xfb_info->output_count > 0;
+      bool points = kk_draws_polygons_as_points(state, infos, shader_count);
+      if (points && (has_gs || xfb)) {
+         mesa_logw_once("kk: polygon mode point with a geometry shader or "
+                        "transform feedback is drawn filled");
+         points = false;
+      }
+
+      if (has_gs || xfb_stage < 0 || !(xfb || points)) {
          xfb_stage = -1;
-      else
+      } else {
+         point_gs = points;
          infos[xfb_stage].nir->info.next_stage = MESA_SHADER_GEOMETRY;
+      }
    }
 
    /* Lower shaders, notably lowering IO. This is a prerequisite for intershader
@@ -2672,8 +2910,13 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
       passthrough_index = xfb_stage + 1u;
       for (uint32_t j = total_shaders; j > passthrough_index; j--)
          nir_shaders[j] = nir_shaders[j - 1u];
+      nir_shader *fs = infos[shader_count - 1u].stage == MESA_SHADER_FRAGMENT
+                          ? nir_shaders[total_shaders]
+                          : NULL;
       nir_shaders[passthrough_index] =
-         kk_create_passthrough_gs(dev, nir_shaders[xfb_stage], state);
+         point_gs
+            ? kk_create_polygon_point_gs(dev, nir_shaders[xfb_stage], fs)
+            : kk_create_passthrough_gs(dev, nir_shaders[xfb_stage], state);
       total_shaders += 1u;
 
       if (nir_shaders[passthrough_index] == NULL) {
@@ -2794,7 +3037,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
    if (stipple_start_slot >= 0) {
       shaders[total_shaders - 1u]->info.fs.uses_flat_varyings = fs_uses_flat;
       assert(shaders[0]->info.stage == MESA_SHADER_VERTEX);
-      shaders[0]->info.vs.line_stipple = true;
+      shaders[0]->info.vs.raster_data = true;
    }
 
    /* Compile pipeline:
@@ -2818,7 +3061,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
          empty->info.has_fs_stats = false;
       }
       gather_graphics_pipeline_create_info(state, shaders, total_shaders);
-      shaders[0]->info.vs.xfb_passthrough = passthrough_index != UINT32_MAX;
+      shaders[0]->info.vs.internal_gs = passthrough_index != UINT32_MAX;
+      shaders[0]->info.vs.raster_data |= point_gs;
       result = kk_compile_graphics_pipeline(dev, shaders[0]);
 
       uint32_t out = 0;

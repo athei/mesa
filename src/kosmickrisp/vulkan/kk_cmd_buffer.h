@@ -27,11 +27,16 @@
 
 struct kk_query_pool;
 
-/* What kk_nir_lower_line_stipple reads: the scale (x, y) and offset (x, y)
- * of each viewport transform, and the stipple factor << 16 | the pattern */
-struct kk_line_stipple_data {
+/* The rasterizer state the shaders that emulate rasterization read
+ * (kk_nir_lower_line_stipple and the polygon mode point geometry shader):
+ * the scale (x, y) and offset (x, y) of each viewport transform, the stipple
+ * factor << 16 | the pattern, the VkCullModeFlags and whether
+ * counter-clockwise triangles face front, after the tessellator's winding */
+struct kk_raster_data {
    float viewport_xform[KK_MAX_VIEWPORTS * 4];
    uint32_t stipple;
+   uint32_t cull_mode;
+   uint32_t front_ccw;
 };
 
 struct kk_root_descriptor_table {
@@ -51,9 +56,9 @@ struct kk_root_descriptor_table {
          bool emulate_depth_clamp;
          bool emulate_viewport_z;
 
-         /* struct kk_line_stipple_data, uploaded for pipelines with line
-          * stipple only */
-         uint64_t line_stipple;
+         /* struct kk_raster_data, uploaded only for the pipelines that read
+          * it */
+         uint64_t raster_data;
       } draw;
       struct {
          uint32_t base_group[3];
