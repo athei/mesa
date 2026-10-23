@@ -152,13 +152,13 @@ struct wsi_device {
    } win32;
 
    struct {
-      /* Metal4 requires making CAMetalLayer's residencySet resident for the
-       * queue that will render to it. We need a way to query the queue to
-       * make it possible. */
-      void *(*get_mtl4_command_queue)(VkDevice device);
       VkResult (*bind_drawable_to_vkimage)(VkImage image, void *drawable);
       /* Does not transfer the ownership to the command buffer. The command
-       * buffer must retain the drawable to ensure lifespan. */
+       * buffer must retain the drawable to ensure lifespan. Called while the
+       * command buffer records, before the blit: Metal4 requires the
+       * CAMetalLayer's residencySet to be resident for the work that renders
+       * to its drawables, and the driver makes it so for the command buffer
+       * rather than its queue, which takes at most 32 residency sets. */
       void (*encode_drawable_present)(VkCommandBuffer cmd, void *drawable);
       /* Required to work around Metal4 presentation bug. */
       void (*cmd_blit_image)(VkCommandBuffer cmd,
