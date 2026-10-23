@@ -33,6 +33,7 @@
 static void
 zink_kopper_set_present_mode_for_interval(struct kopper_displaytarget *cdt, int interval)
 {
+   cdt->swap_interval = interval;
 #if DETECT_OS_WINDOWS
     // not hooked up yet so let's not sabotage benchmarks
     cdt->present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
@@ -984,6 +985,21 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res,
          cpi->regions[i].layer = boxes[i].z;
       }
       cpi->info.pNext = &cpi->rinfo;
+   }
+   /* FIFO has no swap interval of its own; Mesa's Metal WSI takes the GL
+    * one through VkPresentIntervalsInfoMESA and shows each frame for that
+    * many refreshes at least. Other drivers are not given the private
+    * struct.
+    */
+   if (cdt->type == KOPPER_METAL && cdt->swap_interval > 1 &&
+       zink_driverid(screen) == VK_DRIVER_ID_MESA_KOSMICKRISP &&
+       cdt->swapchain->scci.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+      cpi->interval = cdt->swap_interval;
+      cpi->iinfo.sType = VK_STRUCTURE_TYPE_PRESENT_INTERVALS_INFO_MESA;
+      cpi->iinfo.pNext = cpi->info.pNext;
+      cpi->iinfo.swapchainCount = 1;
+      cpi->iinfo.pIntervals = &cpi->interval;
+      cpi->info.pNext = &cpi->iinfo;
    }
    /* Ex GLX_EXT_buffer_age:
     *
