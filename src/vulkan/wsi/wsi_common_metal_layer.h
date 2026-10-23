@@ -29,15 +29,17 @@ wsi_metal_layer_size(const CAMetalLayer *metal_layer,
    uint32_t *width, uint32_t *height);
 
 /* Calls refresh_rate_handler with the highest refresh rate in Hz of the
- * screen showing the layer, or 0 when no screen reports one. AppKit's views,
+ * screen showing the layer, or 0 when no screen reports one, and whether the
+ * window showing the layer is minimized or not visible. AppKit's views,
  * windows and screens belong to the main thread: called on the main thread,
  * the handler runs before this returns; called anywhere else, the query is
  * queued on the main dispatch queue and the handler runs there later, so in
  * a process whose main thread never services that queue the swapchain keeps
- * its initial rate. */
+ * its initial rate and never learns that its window is hidden. */
 void
 wsi_metal_layer_query_refresh_rate(const CAMetalLayer *metal_layer,
-                                   void (*refresh_rate_handler)(void *, uint32_t),
+                                   void (*refresh_rate_handler)(void *, uint32_t,
+                                                                bool),
                                    void *data);
 
 VkResult
@@ -56,9 +58,27 @@ wsi_metal_layer_acquire_drawable(const CAMetalLayer *metal_layer);
 void
 wsi_metal_release_drawable(CAMetalDrawable *drawable_ptr);
 
+/* A serial dispatch queue for wsi_metal_layer_fetch_drawable, one per
+ * swapchain, so that fetches blocked in nextDrawable, for up to one second
+ * each, do not take the workers of a global queue. NULL on failure. */
+void *
+wsi_metal_create_fetch_queue(void);
+
+void
+wsi_metal_release_fetch_queue(void *queue);
+
+/* Calls nextDrawable on the serial queue and then done(data, drawable)
+ * there with a retained drawable, or NULL when nextDrawable timed out. */
+void
+wsi_metal_layer_fetch_drawable(void *queue, const CAMetalLayer *metal_layer,
+                               void (*done)(void *, CAMetalDrawable *),
+                               void *data);
+
 /* Calls presented_handler(data, present_id, paced, presented_time) once
  * Metal has shown the drawable, with the time it was shown, or has let it go
- * without showing it, with 0. present_id and paced are passed through. */
+ * without showing it, with 0, or, with -1, when Metal releases the handler
+ * without calling it. It is called exactly once, on any thread.
+ * present_id and paced are passed through. */
 void
 wsi_metal_layer_add_presented_handler(CAMetalDrawable *drawable_ptr,
                                       void (*presented_handler)(void *, uint64_t,
