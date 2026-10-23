@@ -99,6 +99,7 @@ kk_files = files(
   'kk_nir_lower_descriptors.c',
   'kk_nir_lower_image_view_min_lod.c',
   'kk_nir_lower_multiview.c',
+  'kk_nir_lower_non_seamless_cube.c',
   'kk_nir_lower_null_images.c',
   'kk_nir_lower_textures.c',
   'kk_nir_lower_vbo.h',
