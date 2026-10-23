@@ -340,6 +340,22 @@ struct wsi_metal_image {
    CAMetalDrawable *drawable;
 };
 
+/* The presents of a layer whose presented handler has not run yet. While a
+ * window is covered by another application's window, the compositor can
+ * hold its presents without running their handlers until it is uncovered,
+ * and that is how the swapchain tells. A swapchain created with an
+ * oldSwapchain on the same layer shares this with the one it replaces, since
+ * the old swapchain's held presents are the layer's too. Ref-counted by the
+ * present infos that use it. */
+struct wsi_metal_layer_hold {
+   int ref_count;
+   mtx_t mutex;
+   uint32_t outstanding;
+   /* os_time_get_nano() of the last handler, or of the present that made
+    * outstanding non-zero, whichever came later. Under the mutex. */
+   int64_t last_progress_ns;
+};
+
 struct wsi_metal_present_info {
    /* Present info is ref-counted so that, if a lingering present handler is
     * waiting to execute after the swapchain is freed, we can defer freeing it
@@ -347,8 +363,24 @@ struct wsi_metal_present_info {
    int ref_count;
    mtx_t mutex;
 
+   /* Broadcast whenever a presented handler runs and whenever a drawable
+    * fetch ends, under the mutex. */
    struct u_cnd_monotonic present_id_cond;
    uint64_t present_id;
+
+   /* The layer's held presents, with a reference of this present info. */
+   struct wsi_metal_layer_hold *hold;
+
+   /* The drawable fetch (wsi_metal_layer_fetch_drawable), under the mutex:
+    * set while one runs; set when it ended, with its drawable or NULL, which
+    * the next acquire takes; set when the swapchain is gone, so a fetch that
+    * ends later releases its drawable. A running fetch holds a reference. */
+   bool fetch_running;
+   bool fetch_done;
+   bool abandoned;
+   CAMetalDrawable *fetched;
+   /* The serial dispatch queue the fetches of this swapchain run on. */
+   void *fetch_queue;
 
    /* The highest refresh rate in Hz of the screen showing the layer, which
     * paces FIFO presents. The main thread writes it. */
@@ -356,9 +388,18 @@ struct wsi_metal_present_info {
    /* Set while a refresh rate query is queued on the main thread, so there
     * is never more than one. */
    uint32_t refresh_rate_pending;
+   /* Set while that query last found the window minimized or not visible.
+    * The main thread writes it. */
+   uint32_t window_hidden;
+
+   /* Set once a present of the swapchain was shown. The presented handlers
+    * write it. */
+   uint32_t shown_once;
 
    /* Paced presents in a row that Metal let go without showing them
-    * (presentedTime 0). The presented handlers write it. */
+    * (presentedTime 0). The presented handlers write it. Handlers that run
+    * at the same time can apply a reset and an increment in either order,
+    * which moves the start of the CPU hold by one frame at most. */
    uint32_t undisplayed_run;
 };
 
@@ -368,6 +409,38 @@ struct wsi_metal_present_info {
  * one that is being covered a few more, so the run has to be longer than
  * those. At 120 Hz a window that shows nothing reaches it in about 130 ms. */
 #define WSI_METAL_UNDISPLAYED_LIMIT 16
+
+/* How long a present wait waits for the compositor to show a present once
+ * its GPU work is done, while the window is not known to show nothing. A
+ * shown present is on screen within a few refreshes; one the compositor
+ * holds (in a window covered by another application's, its handler runs
+ * only when the window is uncovered) must not stall the application. */
+#define WSI_METAL_PRESENT_WAIT_BOUND_NS (500ull * 1000 * 1000)
+
+/* A window shows nothing once this many paced presents in a row came back
+ * unshown (undisplayed_run). A shown window's paced presents come back
+ * shown, apart from a stray one; those of a window that is being covered,
+ * hidden or minimized come back unshown from then on. IMMEDIATE presents
+ * do not count: an application faster than the screen has most of them
+ * replaced before they are shown. A window that has just come on screen
+ * leaves its first few presents unshown too, so until the swapchain has
+ * shown one, the run has to reach WSI_METAL_UNDISPLAYED_LIMIT. */
+#define WSI_METAL_UNSHOWN_STREAK 2
+
+/* A window also shows nothing while its oldest held present has had no
+ * presented handler for this many frame periods, and at least
+ * WSI_METAL_HANDLER_STALL_MIN_NS, with its GPU work done: a shown present
+ * runs its handler within a few refreshes. */
+#define WSI_METAL_HANDLER_STALL_FRAMES 4
+#define WSI_METAL_HANDLER_STALL_MIN_NS (100ll * 1000 * 1000)
+
+/* How many frame periods acquire waits for nextDrawable before it gives a
+ * window that shows nothing an image without a drawable. nextDrawable of a
+ * shown window returns within a refresh or two. A wait this long also has
+ * the main thread look at the window again, which is how a minimized or
+ * hidden window is noticed between the queries every
+ * WSI_METAL_REFRESH_RATE_PRESENTS presents. */
+#define WSI_METAL_FETCH_WAIT_FRAMES 4
 
 /* The refresh rate FIFO presents are paced at until the main thread has
  * looked at the screen, and when no screen reports one. */
@@ -396,6 +469,8 @@ struct wsi_metal_swapchain {
    int64_t unshown_release_ns;
 
    uint32_t current_image_index;
+   /* The image of the newest present, UINT32_MAX before the first. */
+   uint32_t last_presented_index;
 
    /* VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR */
    bool opaque_composition;
@@ -405,8 +480,47 @@ struct wsi_metal_swapchain {
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_metal_swapchain, base.base, VkSwapchainKHR,
                                VK_OBJECT_TYPE_SWAPCHAIN_KHR)
 
+static void
+wsi_metal_release_layer_hold(struct wsi_metal_layer_hold *hold)
+{
+   int ref_count = p_atomic_dec_return(&hold->ref_count);
+   assert(ref_count >= 0);
+
+   if (ref_count)
+      return;
+
+   mtx_destroy(&hold->mutex);
+   vk_free(vk_default_allocator(), hold);
+}
+
+/* A new hold count, or a reference to shared when it is not NULL. */
+static struct wsi_metal_layer_hold *
+wsi_metal_get_layer_hold(struct wsi_metal_layer_hold *shared)
+{
+   if (shared) {
+      p_atomic_inc(&shared->ref_count);
+      return shared;
+   }
+
+   /* Freed from a presented handler, so on the default allocator, as the
+    * present info is. */
+   struct wsi_metal_layer_hold *hold =
+      vk_zalloc(vk_default_allocator(), sizeof(*hold), alignof(*hold),
+                VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (hold == NULL)
+      return NULL;
+
+   if (mtx_init(&hold->mutex, mtx_plain) != thrd_success) {
+      vk_free(vk_default_allocator(), hold);
+      return NULL;
+   }
+
+   hold->ref_count = 1;
+   return hold;
+}
+
 static struct wsi_metal_present_info *
-wsi_metal_create_present_info()
+wsi_metal_create_present_info(struct wsi_metal_layer_hold *shared_hold)
 {
    /* Per spec, we cannot use user-provided allocator callbacks from a thread.
     * Since we may free from a lingering present handler, we need to use the
@@ -433,6 +547,23 @@ wsi_metal_create_present_info()
       return NULL;
    }
 
+   info->hold = wsi_metal_get_layer_hold(shared_hold);
+   if (info->hold == NULL) {
+      u_cnd_monotonic_destroy(&info->present_id_cond);
+      mtx_destroy(&info->mutex);
+      vk_free(allocator, info);
+      return NULL;
+   }
+
+   info->fetch_queue = wsi_metal_create_fetch_queue();
+   if (info->fetch_queue == NULL) {
+      wsi_metal_release_layer_hold(info->hold);
+      u_cnd_monotonic_destroy(&info->present_id_cond);
+      mtx_destroy(&info->mutex);
+      vk_free(allocator, info);
+      return NULL;
+   }
+
    info->ref_count = 1;
    info->refresh_rate = WSI_METAL_DEFAULT_REFRESH_RATE;
    return info;
@@ -447,6 +578,10 @@ wsi_metal_release_present_info(struct wsi_metal_present_info *info)
    if (ref_count)
       return;
 
+   if (info->fetched)
+      wsi_metal_release_drawable(info->fetched);
+   wsi_metal_release_fetch_queue(info->fetch_queue);
+   wsi_metal_release_layer_hold(info->hold);
    mtx_destroy(&info->mutex);
    u_cnd_monotonic_destroy(&info->present_id_cond);
 
@@ -513,6 +648,13 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       };
       wsi->BeginCommandBuffer(image->blit.cmd_buffers[i], &begin_info);
+
+      /* An image acquired without a drawable is presented to nothing, and
+       * the present still submits this command buffer. */
+      if (!metal_image->drawable) {
+         result = wsi->EndCommandBuffer(image->blit.cmd_buffers[i]);
+         continue;
+      }
 
       VkImageMemoryBarrier img_mem_barriers[] = {
          {
@@ -622,6 +764,98 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
    return result;
 }
 
+static double
+wsi_metal_swapchain_min_present_duration(const struct wsi_metal_swapchain *chain);
+static void
+wsi_metal_swapchain_query_refresh_rate(struct wsi_metal_swapchain *chain);
+
+/* The time a paced present stays on screen at least, or one refresh period
+ * of the screen for a present that is not paced, in ns. A present wait on
+ * another thread may read the present mode and interval while a present
+ * changes them; it then bounds its wait by the old or the new period, which
+ * both are right for one present or the other. */
+static uint64_t
+wsi_metal_swapchain_frame_period_ns(const struct wsi_metal_swapchain *chain)
+{
+   const double refresh_period =
+      1.0 / p_atomic_read(&chain->present_info->refresh_rate);
+   return MAX2(wsi_metal_swapchain_min_present_duration(chain),
+               refresh_period) * 1e9;
+}
+
+/* Whether the window is known to show nothing: the main thread last found
+ * it minimized or not visible, its last paced presents came back unshown,
+ * or its oldest held present has had no presented handler for much longer
+ * than a shown one takes. A hidden, minimized or covered window and a locked
+ * screen show nothing; a visible window does not, so this never holds for
+ * one. A minimized window needs the first rule: the compositor can report
+ * its presents shown, for the Dock's tile, and still keep its drawables for
+ * a second at a time.
+ *
+ * While the GPU still works on the newest present, the drawables are the
+ * GPU's and not the compositor's, and a present has no handler before its
+ * GPU work is done either, so a window with slow GPU frames must not count
+ * as one that shows nothing. gpu_fence, when not VK_NULL_HANDLE, is the
+ * fence of the newest present's GPU work; while it is unsignaled only a
+ * window the main thread found minimized or hidden shows nothing, and the
+ * stall of the handlers counts from the last time the GPU was seen busy. */
+static bool
+wsi_metal_swapchain_shows_nothing(const struct wsi_metal_swapchain *chain,
+                                  VkFence gpu_fence)
+{
+   struct wsi_metal_present_info *present_info = chain->present_info;
+   struct wsi_metal_layer_hold *hold = present_info->hold;
+
+   if (p_atomic_read(&present_info->window_hidden))
+      return true;
+
+   if (gpu_fence != VK_NULL_HANDLE &&
+       chain->base.wsi->GetFenceStatus(chain->base.device, gpu_fence) == VK_NOT_READY) {
+      const int64_t now = os_time_get_nano();
+      mtx_lock(&hold->mutex);
+      hold->last_progress_ns = MAX2(hold->last_progress_ns, now);
+      mtx_unlock(&hold->mutex);
+      return false;
+   }
+
+   const uint32_t streak = p_atomic_read(&present_info->shown_once) ?
+      WSI_METAL_UNSHOWN_STREAK : WSI_METAL_UNDISPLAYED_LIMIT;
+   if (p_atomic_read(&present_info->undisplayed_run) >= streak)
+      return true;
+
+   const int64_t stall_ns =
+      MAX2((int64_t)(WSI_METAL_HANDLER_STALL_FRAMES *
+                     wsi_metal_swapchain_frame_period_ns(chain)),
+           WSI_METAL_HANDLER_STALL_MIN_NS);
+   mtx_lock(&hold->mutex);
+   const bool stalled = hold->outstanding &&
+                        os_time_get_nano() - hold->last_progress_ns > stall_ns;
+   mtx_unlock(&hold->mutex);
+   return stalled;
+}
+
+/* Ends a drawable fetch: hands the drawable, or NULL when nextDrawable timed
+ * out, to the next acquire, or releases it when the swapchain is gone. */
+static void
+wsi_metal_fetch_complete(void *present_info_ptr, CAMetalDrawable *drawable)
+{
+   struct wsi_metal_present_info *present_info = present_info_ptr;
+
+   mtx_lock(&present_info->mutex);
+   present_info->fetch_running = false;
+   if (present_info->abandoned) {
+      if (drawable)
+         wsi_metal_release_drawable(drawable);
+   } else {
+      present_info->fetch_done = true;
+      present_info->fetched = drawable;
+   }
+   u_cnd_monotonic_broadcast(&present_info->present_id_cond);
+   mtx_unlock(&present_info->mutex);
+
+   wsi_metal_release_present_info(present_info);
+}
+
 static VkResult
 wsi_metal_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
                                        const VkAcquireNextImageInfoKHR *info,
@@ -629,38 +863,95 @@ wsi_metal_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
 {
    struct wsi_metal_swapchain *chain =
       (struct wsi_metal_swapchain *)wsi_chain;
-   struct timespec start_time, end_time;
-   struct timespec rel_timeout;
+   struct wsi_metal_present_info *present_info = chain->present_info;
+   const uint64_t abs_timeout = os_time_get_absolute_timeout(info->timeout);
+   const uint64_t start = os_time_get_nano();
+   const uint64_t period = wsi_metal_swapchain_frame_period_ns(chain);
+   VkResult result = VK_SUCCESS;
+   CAMetalDrawable *drawable = NULL;
 
-   timespec_from_nsec(&rel_timeout, info->timeout);
+   /* nextDrawable blocks until the compositor gives a drawable back, for up
+    * to one second, and then returns nil. A window that shows nothing may
+    * not get one back for that long: the compositor can keep the drawables
+    * of a covered or minimized window although their presents came back
+    * unshown. So nextDrawable runs on another thread, and acquire waits for
+    * it in steps of one frame period. Once it has waited
+    * WSI_METAL_FETCH_WAIT_FRAMES periods and the window shows nothing, the
+    * application gets an image without a drawable, whose present shows
+    * nothing; the frame is dropped, as the compositor drops the frames of
+    * such a window anyway. The fetch goes on, and a later acquire takes its
+    * drawable. A window that shows its frames always waits for its
+    * drawable. */
+   /* The GPU work of the newest present; the queue runs in order, so all
+    * older work is done once it is. While it runs, the GPU holds the
+    * presents, and a window with slow GPU frames is not one that shows
+    * nothing. */
+   const VkFence gpu_fence = chain->last_presented_index < chain->base.image_count ?
+      chain->base.fences[chain->last_presented_index] : VK_NULL_HANDLE;
 
-   clock_gettime(CLOCK_MONOTONIC, &start_time);
-   timespec_add(&end_time, &rel_timeout, &start_time);
-
-   while (1) {
-      /* Try to acquire an drawable. Unfortunately we might block for up to 1 second. */
-      CAMetalDrawable *drawable = wsi_metal_layer_acquire_drawable(chain->layer);
-      if (drawable) {
-         uint32_t i = (chain->current_image_index++) % chain->base.image_count;
-         struct wsi_metal_image *image = &chain->images[i];
-         *image_index = i;
-         image->drawable = drawable;
-         if (!wsi_chain->wsi->sw) {
-            chain->base.wsi->metal.bind_drawable_to_vkimage(image->base.blit.image,
-                                                            image->drawable);
-            /* Since present images will only be backed by MTLTextures after acquisition,
-             * we need to re-record the command buffer so it uses the new drawable. */
-            wsi_cmd_blit_image_to_image(wsi_chain, &wsi_chain->image_info, &image->base);
+   mtx_lock(&present_info->mutex);
+   if (!present_info->fetch_done && !present_info->fetch_running) {
+      present_info->fetch_running = true;
+      wsi_metal_retain_present_info(present_info);
+      wsi_metal_layer_fetch_drawable(present_info->fetch_queue, chain->layer,
+                                     wsi_metal_fetch_complete, present_info);
+   }
+   bool window_queried = false;
+   while (!present_info->fetch_done) {
+      const uint64_t now = os_time_get_nano();
+      if (now >= abs_timeout) {
+         result = info->timeout ? VK_TIMEOUT : VK_NOT_READY;
+         break;
+      }
+      if (now - start >= WSI_METAL_FETCH_WAIT_FRAMES * period) {
+         /* Has the main thread look at the window, without waiting for
+          * the answer: the next steps of the wait, and the next acquire,
+          * see it. It goes out before the check below, so a window still
+          * marked hidden from before it was restored is looked at again
+          * rather than only at the next query every
+          * WSI_METAL_REFRESH_RATE_PRESENTS presents. Only a slow fetch
+          * does this, so a window that gets its drawables in time costs
+          * no round trip to the main thread. */
+         if (!window_queried) {
+            window_queried = true;
+            wsi_metal_swapchain_query_refresh_rate(chain);
          }
-         return VK_SUCCESS;
+         if (wsi_metal_swapchain_shows_nothing(chain, gpu_fence))
+            break;
       }
 
-      /* Check for timeout. */
-      struct timespec current_time;
-      clock_gettime(CLOCK_MONOTONIC, &current_time);
-      if (timespec_after(&current_time, &end_time))
-         return VK_NOT_READY;
+      struct timespec until;
+      timespec_from_nsec(&until, MIN2(now + period, abs_timeout));
+      int ret = u_cnd_monotonic_timedwait(&present_info->present_id_cond,
+                                          &present_info->mutex, &until);
+      if (ret != thrd_success && ret != thrd_timedout) {
+         result = VK_ERROR_DEVICE_LOST;
+         break;
+      }
    }
+   if (result == VK_SUCCESS && present_info->fetch_done) {
+      drawable = present_info->fetched;
+      present_info->fetched = NULL;
+      present_info->fetch_done = false;
+   }
+   mtx_unlock(&present_info->mutex);
+
+   if (result != VK_SUCCESS)
+      return result;
+
+   uint32_t i = (chain->current_image_index++) % chain->base.image_count;
+   struct wsi_metal_image *image = &chain->images[i];
+   *image_index = i;
+   image->drawable = drawable;
+   if (!wsi_chain->wsi->sw) {
+      if (drawable)
+         chain->base.wsi->metal.bind_drawable_to_vkimage(image->base.blit.image,
+                                                         image->drawable);
+      /* Since present images will only be backed by MTLTextures after acquisition,
+       * we need to re-record the command buffer so it uses the new drawable. */
+      wsi_cmd_blit_image_to_image(wsi_chain, &wsi_chain->image_info, &image->base);
+   }
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -705,13 +996,18 @@ wsi_metal_swapchain_set_present_mode(struct wsi_swapchain *wsi_chain,
 }
 
 static void
-wsi_metal_refresh_rate_complete(void *present_info_ptr, uint32_t refresh_rate)
+wsi_metal_refresh_rate_complete(void *present_info_ptr, uint32_t refresh_rate,
+                                bool window_hidden)
 {
    struct wsi_metal_present_info *present_info = present_info_ptr;
 
    /* Without a screen to ask, the rate in use stays. */
    if (refresh_rate)
       p_atomic_set(&present_info->refresh_rate, refresh_rate);
+   /* No broadcast: this can run inside an acquire on the main thread, which
+    * holds the mutex, and an acquire that waits looks again every frame
+    * period anyway. */
+   p_atomic_set(&present_info->window_hidden, window_hidden);
    p_atomic_set(&present_info->refresh_rate_pending, 0);
 
    wsi_metal_release_present_info(present_info);
@@ -752,31 +1048,53 @@ wsi_metal_swapchain_min_present_duration(const struct wsi_metal_swapchain *chain
    }
 }
 
-/* The presented handler of a present. A paced present that was not shown
- * extends the run of undisplayed ones, a shown one ends it; present_id is 0
- * for a present nobody waits for. */
+/* Records the end of a present: shown at presented_time, let go unshown (0),
+ * or released by Metal without a word (-1). A paced present that was not
+ * shown extends the run of undisplayed ones, a shown one ends it. held says
+ * the present was counted in outstanding; present_id is 0 for a present
+ * nobody waits for. */
+static void
+wsi_metal_present_info_complete(struct wsi_metal_present_info *present_info,
+                                uint64_t present_id, bool paced,
+                                double presented_time, bool held)
+{
+   if (presented_time > 0.0 && !p_atomic_read(&present_info->shown_once))
+      p_atomic_set(&present_info->shown_once, 1);
+
+   /* Only paced presents count for the run: an IMMEDIATE application that
+    * renders faster than the screen has most of its frames replaced before
+    * they are shown, although its window is visible. */
+   if (paced && presented_time > 0.0)
+      p_atomic_set(&present_info->undisplayed_run, 0);
+   else if (paced && presented_time == 0.0)
+      p_atomic_inc(&present_info->undisplayed_run);
+
+   if (held) {
+      struct wsi_metal_layer_hold *hold = present_info->hold;
+      mtx_lock(&hold->mutex);
+      assert(hold->outstanding > 0);
+      hold->outstanding--;
+      hold->last_progress_ns = os_time_get_nano();
+      mtx_unlock(&hold->mutex);
+   }
+
+   mtx_lock(&present_info->mutex);
+   if (present_id > present_info->present_id)
+      present_info->present_id = present_id;
+   u_cnd_monotonic_broadcast(&present_info->present_id_cond);
+   mtx_unlock(&present_info->mutex);
+}
+
+/* The presented handler of a present, which holds a reference to the
+ * present info. */
 static void
 wsi_metal_present_complete(void *present_info_ptr, uint64_t present_id,
                            bool paced, double presented_time)
 {
    struct wsi_metal_present_info *present_info = present_info_ptr;
 
-   if (paced) {
-      if (presented_time > 0.0)
-         p_atomic_set(&present_info->undisplayed_run, 0);
-      else
-         p_atomic_inc(&present_info->undisplayed_run);
-   }
-
-   if (present_id) {
-      mtx_lock(&present_info->mutex);
-      if (present_id > present_info->present_id) {
-         present_info->present_id = present_id;
-         u_cnd_monotonic_broadcast(&present_info->present_id_cond);
-      }
-      mtx_unlock(&present_info->mutex);
-   }
-
+   wsi_metal_present_info_complete(present_info, present_id, paced,
+                                   presented_time, true);
    wsi_metal_release_present_info(present_info);
 }
 
@@ -819,21 +1137,34 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    assert(image_index < chain->base.image_count);
 
    struct wsi_metal_image *image = &chain->images[image_index];
+   /* Acquire checks the fence of this image's GPU work, which the common
+    * code submitted before this call. */
+   chain->last_presented_index = image_index;
 
    if (++chain->presents_since_refresh_rate >= WSI_METAL_REFRESH_RATE_PRESENTS)
       wsi_metal_swapchain_query_refresh_rate(chain);
    const double min_duration = wsi_metal_swapchain_min_present_duration(chain);
    const bool paced = min_duration > 0.0;
 
-   /* Paced presents always get a handler, which tells whether they were
-    * shown. */
    if (!wsi_chain->present_wait_enabled)
       present_id = 0;
-   if (present_id || paced) {
-      wsi_metal_retain_present_info(chain->present_info);
+
+   if (image->drawable) {
+      /* Every present gets a handler: it says whether the present was shown,
+       * and a window whose handlers stop coming shows nothing. */
+      struct wsi_metal_present_info *present_info = chain->present_info;
+      mtx_lock(&present_info->hold->mutex);
+      if (!present_info->hold->outstanding++)
+         present_info->hold->last_progress_ns = os_time_get_nano();
+      mtx_unlock(&present_info->hold->mutex);
+      wsi_metal_retain_present_info(present_info);
       wsi_metal_layer_add_presented_handler(
-         image->drawable, wsi_metal_present_complete, chain->present_info,
+         image->drawable, wsi_metal_present_complete, present_info,
          present_id, paced);
+   } else {
+      /* Acquired without a drawable: the frame is not shown. */
+      wsi_metal_present_info_complete(chain->present_info, present_id, paced,
+                                      0.0, false);
    }
 
    if (paced &&
@@ -841,7 +1172,9 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
           WSI_METAL_UNDISPLAYED_LIMIT)
       wsi_metal_swapchain_hold_unshown(chain, min_duration);
 
-   if (wsi_chain->wsi->sw) {
+   if (!image->drawable) {
+      /* Nothing to present. */
+   } else if (wsi_chain->wsi->sw) {
       wsi_metal_layer_blit_and_present(chain->blit_context,
          &image->drawable,
          image->base.cpu_map,
@@ -866,7 +1199,6 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
    struct wsi_metal_swapchain *chain = (struct wsi_metal_swapchain *)wsi_chain;
    struct wsi_metal_present_info *present_info = chain->present_info;
 
-   struct timespec abs_timespec;
    uint64_t abs_timeout = 0;
 
    if (timeout != 0)
@@ -879,23 +1211,43 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
    if (result != VK_SUCCESS)
       return result;
 
-   timespec_from_nsec(&abs_timespec, abs_timeout);
+   /* The GPU work is done, and what is left is the compositor's part. It
+    * may never come while the window shows nothing: the compositor then can
+    * hold the presents of a covered window without showing them or running
+    * their handlers until the window is uncovered, for seconds if need be.
+    * So the wait for it is bounded, and when the bound passes the present
+    * counts as complete, as an unshown frame. The wait checks every frame
+    * period whether the window shows nothing, and ends at the first check
+    * that finds it so, and after WSI_METAL_PRESENT_WAIT_BOUND_NS anyway. A
+    * timeout of the application's own that ends first returns VK_TIMEOUT. */
+   const uint64_t start = os_time_get_nano();
+   const uint64_t period = wsi_metal_swapchain_frame_period_ns(chain);
 
    mtx_lock(&present_info->mutex);
    while (present_info->present_id < waitValue) {
-      int ret = u_cnd_monotonic_timedwait(&present_info->present_id_cond,
-                                          &present_info->mutex,
-                                          &abs_timespec);
-      if (ret == thrd_timedout) {
+      const uint64_t now = os_time_get_nano();
+      if (timeout != 0 &&
+          (now - start >= WSI_METAL_PRESENT_WAIT_BOUND_NS ||
+           (now - start >= period &&
+            wsi_metal_swapchain_shows_nothing(chain, VK_NULL_HANDLE)))) {
+         present_info->present_id = waitValue;
+         u_cnd_monotonic_broadcast(&present_info->present_id_cond);
+         break;
+      }
+      if (now >= abs_timeout) {
          result = VK_TIMEOUT;
          break;
       }
-      if (ret != thrd_success) {
+
+      struct timespec until;
+      timespec_from_nsec(&until, MIN2(now + period, abs_timeout));
+      int ret = u_cnd_monotonic_timedwait(&present_info->present_id_cond,
+                                          &present_info->mutex, &until);
+      if (ret != thrd_success && ret != thrd_timedout) {
          result = VK_ERROR_DEVICE_LOST;
          break;
       }
    }
-
    mtx_unlock(&present_info->mutex);
    return result;
 }
@@ -995,7 +1347,17 @@ wsi_metal_swapchain_destroy(struct wsi_swapchain *wsi_chain,
    if (chain->base.wsi->sw)
       wsi_destroy_metal_layer_blit_context(chain->blit_context);
 
-   wsi_metal_release_present_info(chain->present_info);
+   /* A drawable fetched for an acquire that never came goes back, and one
+    * still being fetched goes back when the fetch ends. */
+   struct wsi_metal_present_info *present_info = chain->present_info;
+   mtx_lock(&present_info->mutex);
+   present_info->abandoned = true;
+   if (present_info->fetched) {
+      wsi_metal_release_drawable(present_info->fetched);
+      present_info->fetched = NULL;
+   }
+   mtx_unlock(&present_info->mutex);
+   wsi_metal_release_present_info(present_info);
 
    if (chain->base.wsi->metal.get_mtl4_command_queue) {
       void *mtl4_queue = chain->base.wsi->metal.get_mtl4_command_queue(chain->base.device);
@@ -1085,20 +1447,51 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->vk_format = pCreateInfo->imageFormat;
    chain->layer = wsi_metal_layer_retain(metal_surface->pLayer);
    chain->current_image_index = 0;
+   chain->last_presented_index = UINT32_MAX;
    chain->opaque_composition = opaque_composition;
 
-   chain->present_info = wsi_metal_create_present_info();
+   /* The swapchain this one replaces on the same layer may still have
+    * drawables of the layer held by the compositor; both count them in one
+    * place. */
+   struct wsi_metal_layer_hold *shared_hold = NULL;
+   if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(wsi_metal_swapchain, old_chain, pCreateInfo->oldSwapchain);
+      if (old_chain->layer == chain->layer) {
+         shared_hold = old_chain->present_info->hold;
+
+         /* A drawable the retired swapchain fetched for an acquire that has
+          * not come goes back to the layer, which would otherwise have one
+          * fewer for the new swapchain until the old one is destroyed. An
+          * acquire on the retired swapchain still fetches anew. */
+         struct wsi_metal_present_info *old_info = old_chain->present_info;
+         mtx_lock(&old_info->mutex);
+         if (old_info->fetch_done) {
+            if (old_info->fetched)
+               wsi_metal_release_drawable(old_info->fetched);
+            old_info->fetched = NULL;
+            old_info->fetch_done = false;
+         }
+         mtx_unlock(&old_info->mutex);
+      }
+   }
+
+   chain->present_info = wsi_metal_create_present_info(shared_hold);
    if (chain->present_info == NULL) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_present_info;
    }
 
    /* A swapchain recreated for a resize keeps presenting at the rate of the
-    * one it replaces while the main thread looks at the screen again. */
+    * one it replaces while the main thread looks at the screen again, and
+    * knows what that one knew of its window. */
    if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(wsi_metal_swapchain, old_chain, pCreateInfo->oldSwapchain);
       chain->present_info->refresh_rate =
          p_atomic_read(&old_chain->present_info->refresh_rate);
+      chain->present_info->shown_once =
+         p_atomic_read(&old_chain->present_info->shown_once);
+      chain->present_info->window_hidden =
+         p_atomic_read(&old_chain->present_info->window_hidden);
    }
    wsi_metal_swapchain_query_refresh_rate(chain);
 
