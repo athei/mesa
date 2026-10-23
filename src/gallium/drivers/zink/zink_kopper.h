@@ -28,6 +28,7 @@
 #define ZINK_KOPPER_H
 
 #include "kopper_interface.h"
+#include "vulkan/util/vk_internal_exts.h"
 #include "util/u_queue.h"
 #include "util/set.h"
 
@@ -105,6 +106,7 @@ struct kopper_displaytarget
    bool is_kill;
    unsigned present_count; // presents queued
    VkPresentModeKHR present_mode;
+   int swap_interval; // the GL swap interval the present mode came from
    unsigned readback_counter;
 
    bool age_locked; //disables buffer age during readback
@@ -116,6 +118,8 @@ struct zink_kopper_present_info {
    VkPresentRegionsKHR rinfo;
    VkPresentRegionKHR region;
    VkRectLayerKHR regions[64];
+   VkPresentIntervalsInfoMESA iinfo;
+   uint32_t interval;
    uint32_t image;
    struct kopper_swapchain *swapchain;
    struct zink_resource *res;
