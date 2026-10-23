@@ -1518,6 +1518,27 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
         IS_DIRTY(RS_DEPTH_CLAMP_ENABLE) || IS_DIRTY(RS_DEPTH_CLIP_ENABLE)))
       kk_flush_vp_state(cmd);
 
+   struct kk_shader *stipple_vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   if (stipple_vs && stipple_vs->info.vs.line_stipple &&
+       (IS_SHADER_DIRTY(VERTEX) || IS_DIRTY(VP_VIEWPORT_COUNT) ||
+        IS_DIRTY(VP_VIEWPORTS) || IS_DIRTY(RS_LINE_STIPPLE))) {
+      struct kk_line_stipple_data data = {
+         .stipple = ((uint32_t)dyn->rs.line.stipple.factor << 16) |
+                    dyn->rs.line.stipple.pattern,
+      };
+      for (uint32_t i = 0; i < dyn->vp.viewport_count; i++) {
+         const VkViewport *vp = &dyn->vp.viewports[i];
+         float *xform = &data.viewport_xform[i * 4];
+         xform[0] = vp->width * 0.5f;
+         xform[1] = vp->height * 0.5f;
+         xform[2] = vp->x + vp->width * 0.5f;
+         xform[3] = vp->y + vp->height * 0.5f;
+      }
+      desc->root.draw.line_stipple =
+         kk_pool_upload(cmd, &data, sizeof(data), 16u).gpu;
+      desc->root_dirty = true;
+   }
+
    if (IS_DIRTY(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)) {
       desc->root.draw.clip_z_coeff =
          dyn->vp.depth_clip_negative_one_to_one ? 0.5f : 0.0f;
@@ -1838,6 +1859,9 @@ kk_unroll_adjacency(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    if (unlikely(!out_draws.gpu))
       return false;
 
+   struct kk_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+   bool flat_varyings = fs && fs->info.fs.uses_flat_varyings;
+
    struct libkk_unroll_adjacency_args info = {
       .index_buffer = data->index_buffer.addr,
       .heap = kk_heap(cmd),
@@ -1848,7 +1872,10 @@ kk_unroll_adjacency(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
          data->indexed ? data->index_buffer.range / data->index_buffer_el_size_B
                        : 0u,
       .in_el_size_B = data->index_buffer_el_size_B,
-      .flatshade_first = data->flatshade_first,
+      /* As in kk_unroll_geometry, the vertices are reordered for a last
+       * provoking vertex only for flat inputs, which keeps the first vertex
+       * of each line its start for line stipple */
+      .flatshade_first = data->flatshade_first || !flat_varyings,
       .mode = data->prim,
    };
 

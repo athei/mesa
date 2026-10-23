@@ -96,6 +96,8 @@ struct kk_shader_info {
          bool alpha_to_coverage;
          bool alpha_to_one;
          struct mtl_color_attachment_blend rt0_blend;
+         /* Reads struct kk_line_stipple_data, see kk_nir_lower_line_stipple */
+         bool line_stipple;
          bool has_ds;
          bool has_depth_write;
          bool has_stencil_test;
@@ -227,6 +229,10 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 
 bool kk_nir_lower_custom_border(nir_shader *nir);
 bool kk_nir_lower_non_seamless_cube(nir_shader *nir);
+void kk_nir_lower_line_stipple_output(nir_shader *nir, unsigned start_slot,
+                                      unsigned pos_slot);
+void kk_nir_lower_line_stipple_fs(nir_shader *nir, unsigned start_slot,
+                                  unsigned pos_slot, bool guard_helper_writes);
 bool kk_nir_lower_compute_derivatives(nir_shader *nir);
 bool kk_nir_lower_compute_lod_queries(nir_shader *nir);
 #define KK_ATOMIC64_BUFFER      0
