@@ -583,7 +583,9 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
 
 #ifdef VK_USE_PLATFORM_METAL_EXT
    if (dri2_dpy->kopper) {
-      dri2_setup_swap_interval(disp, 1);
+      /* Intervals above 1 reach the Metal WSI as a minimum present
+       * duration (VkPresentIntervalsInfoMESA). 4 is Direct3D's maximum. */
+      dri2_setup_swap_interval(disp, 4);
       dri2_add_configs_for_visuals(disp, EGL_WINDOW_BIT | EGL_PBUFFER_BIT);
       disp->Extensions.EXT_present_opaque = EGL_TRUE;
    } else
