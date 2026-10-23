@@ -656,6 +656,8 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
          continue;
       }
 
+      wsi->metal.encode_drawable_present(image->blit.cmd_buffers[i], metal_image->drawable);
+
       VkImageMemoryBarrier img_mem_barriers[] = {
          {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -757,8 +759,6 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
                               img_mem_barrier_count, img_mem_barriers);
 
       result = wsi->EndCommandBuffer(image->blit.cmd_buffers[i]);
-
-      wsi->metal.encode_drawable_present(image->blit.cmd_buffers[i], metal_image->drawable);
    }
 
    return result;
@@ -1359,12 +1359,6 @@ wsi_metal_swapchain_destroy(struct wsi_swapchain *wsi_chain,
    mtx_unlock(&present_info->mutex);
    wsi_metal_release_present_info(present_info);
 
-   if (chain->base.wsi->metal.get_mtl4_command_queue) {
-      void *mtl4_queue = chain->base.wsi->metal.get_mtl4_command_queue(chain->base.device);
-      if (mtl4_queue)
-         wsi_metal_layer_remove_queue_resident(chain->layer, mtl4_queue);
-   }
-
    wsi_metal_layer_release(chain->layer);
 
    wsi_swapchain_finish(&chain->base);
@@ -1495,16 +1489,6 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    }
    wsi_metal_swapchain_query_refresh_rate(chain);
 
-   /* The queue counts the adds of a residency set, so each swapchain adds
-    * the layer's set once and removes it once, also while a swapchain that
-    * replaces this one on the same layer is alive.
-    */
-   void *mtl4_queue = NULL;
-   if (wsi_device->metal.get_mtl4_command_queue)
-      mtl4_queue = wsi_device->metal.get_mtl4_command_queue(chain->base.device);
-   if (mtl4_queue)
-      wsi_metal_layer_make_queue_resident(chain->layer, mtl4_queue);
-
    uint32_t created_image_count = 0;
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       result = wsi_metal_create_image(chain, &chain->base.image_info,
@@ -1526,9 +1510,6 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 fail_init_images:
    for (uint32_t i = 0; i < created_image_count; i++)
       wsi_metal_destroy_image(chain, &chain->images[i]);
-
-   if (mtl4_queue)
-      wsi_metal_layer_remove_queue_resident(chain->layer, mtl4_queue);
 
    wsi_metal_release_present_info(chain->present_info);
 

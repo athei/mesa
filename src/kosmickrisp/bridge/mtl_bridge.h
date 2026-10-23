@@ -38,6 +38,11 @@
 
 mtl_texture *mtl_drawable_get_texture(void *drawable_ptr);
 
+/* Makes the drawable's textures resident for the command buffer, which has
+ * to be recording, through the residency set of the drawable's layer. */
+void mtl_command_buffer_use_drawable_residency(mtl_command_buffer *cmd_buf,
+                                               void *drawable_ptr);
+
 void *mtl_retain(void *handle);
 void mtl_release(void *handle);
 

@@ -82,23 +82,17 @@ kk_wsi_cmd_blit_image(VkCommandBuffer vk_cmd, const VkBlitImageInfo2 *blit_info,
    kk_CmdBlitImage2(vk_cmd, blit_info);
 }
 
+/* Called while the blit command buffer that writes the drawable records.
+ * The drawable's textures are in the residency set of its layer, which the
+ * command buffer uses, rather than the queue: a queue takes at most 32
+ * residency sets, and a process can have more windows than that. */
 static void
 kk_encode_drawable_present(VkCommandBuffer vk_cmd, void *drawable)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, vk_cmd);
    mtl_retain(drawable);
    cmd->drawable = drawable;
-}
-
-static void *
-kk_get_mtl4_command_queue(VkDevice device)
-{
-   VK_FROM_HANDLE(kk_device, dev, device);
-   if (dev->has_queue) {
-      return dev->queue.mtl_handle;
-   }
-
-   return NULL;
+   mtl_command_buffer_use_drawable_residency(cmd->metal.cmd_buf, drawable);
 }
 
 static struct vk_queue *
@@ -129,7 +123,6 @@ kk_init_wsi(struct kk_physical_device *pdev)
    wsi->metal.bind_drawable_to_vkimage = kk_bind_drawable_to_vkimage;
    wsi->metal.encode_drawable_present = kk_encode_drawable_present;
    wsi->metal.cmd_blit_image = kk_wsi_cmd_blit_image;
-   wsi->metal.get_mtl4_command_queue = kk_get_mtl4_command_queue;
    wsi->get_blit_queue = kk_get_blit_queue;
 
    pdev->vk.wsi_device = wsi;

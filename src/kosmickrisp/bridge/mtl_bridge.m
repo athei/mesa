@@ -12,11 +12,13 @@
 
 #include "util/macros.h"
 
+#include <Metal/MTL4CommandBuffer.h>
 #include <Metal/MTLCommandBuffer.h>
 #include <Metal/MTLCommandQueue.h>
 #include <Metal/MTLDevice.h>
 #include <Metal/MTLHeap.h>
 #include <Metal/MTLEvent.h>
+#include <Metal/MTLResidencySet.h>
 
 #include <QuartzCore/CAMetalLayer.h>
 
@@ -28,6 +30,19 @@ mtl_drawable_get_texture(void *drawable_ptr)
    @autoreleasepool {
       id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
       return drawable.texture;
+   }
+}
+
+void
+mtl_command_buffer_use_drawable_residency(mtl_command_buffer *cmd_buf,
+                                          void *drawable_ptr)
+{
+   @autoreleasepool {
+      id<MTL4CommandBuffer> buffer = (id<MTL4CommandBuffer>)cmd_buf;
+      id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
+      id<MTLResidencySet> residency_set = drawable.layer.residencySet;
+      if (residency_set)
+         [buffer useResidencySet:residency_set];
    }
 }
 
