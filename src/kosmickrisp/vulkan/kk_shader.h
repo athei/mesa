@@ -96,14 +96,16 @@ struct kk_shader_info {
          bool alpha_to_coverage;
          bool alpha_to_one;
          struct mtl_color_attachment_blend rt0_blend;
-         /* Reads struct kk_line_stipple_data, see kk_nir_lower_line_stipple */
-         bool line_stipple;
+         /* Reads struct kk_raster_data */
+         bool raster_data;
          bool has_ds;
          bool has_depth_write;
          bool has_stencil_test;
 
          struct poly_gs_info gs;
-         bool xfb_passthrough;
+         /* The GS is the driver's: the transform feedback passthrough or the
+          * polygon mode point GS */
+         bool internal_gs;
       } vs;
 
       struct {
@@ -233,6 +235,9 @@ void kk_nir_lower_line_stipple_output(nir_shader *nir, unsigned start_slot,
                                       unsigned pos_slot);
 void kk_nir_lower_line_stipple_fs(nir_shader *nir, unsigned start_slot,
                                   unsigned pos_slot, bool guard_helper_writes);
+struct nir_def *kk_load_raster_data(struct nir_builder *b,
+                                    unsigned num_components, unsigned offset_B,
+                                    struct nir_def *index_B);
 bool kk_nir_lower_compute_derivatives(nir_shader *nir);
 bool kk_nir_lower_compute_lod_queries(nir_shader *nir);
 #define KK_ATOMIC64_BUFFER      0

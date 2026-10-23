@@ -862,7 +862,7 @@ static bool
 kk_gs_is_passthrough(struct kk_cmd_buffer *cmd)
 {
    struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
-   return vs && vs->info.vs.xfb_passthrough;
+   return vs && vs->info.vs.internal_gs;
 }
 
 static uint64_t
@@ -1518,13 +1518,25 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
         IS_DIRTY(RS_DEPTH_CLAMP_ENABLE) || IS_DIRTY(RS_DEPTH_CLIP_ENABLE)))
       kk_flush_vp_state(cmd);
 
-   struct kk_shader *stipple_vs = cmd->state.shaders[MESA_SHADER_VERTEX];
-   if (stipple_vs && stipple_vs->info.vs.line_stipple &&
-       (IS_SHADER_DIRTY(VERTEX) || IS_DIRTY(VP_VIEWPORT_COUNT) ||
-        IS_DIRTY(VP_VIEWPORTS) || IS_DIRTY(RS_LINE_STIPPLE))) {
-      struct kk_line_stipple_data data = {
+   struct kk_shader *raster_vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   if (raster_vs && raster_vs->info.vs.raster_data &&
+       (IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(TESS_CTRL) ||
+        IS_SHADER_DIRTY(TESS_EVAL) || IS_DIRTY(VP_VIEWPORT_COUNT) ||
+        IS_DIRTY(VP_VIEWPORTS) || IS_DIRTY(RS_LINE_STIPPLE) ||
+        IS_DIRTY(RS_CULL_MODE) || IS_DIRTY(RS_FRONT_FACE) ||
+        IS_DIRTY(TS_DOMAIN_ORIGIN))) {
+      /* The winding the render pipeline is given below */
+      bool front_ccw = dyn->rs.front_face != VK_FRONT_FACE_CLOCKWISE;
+      if (cmd->state.shaders[MESA_SHADER_TESS_EVAL]) {
+         front_ccw ^= gfx->tess.info.ccw;
+         front_ccw ^=
+            dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+      }
+      struct kk_raster_data data = {
          .stipple = ((uint32_t)dyn->rs.line.stipple.factor << 16) |
                     dyn->rs.line.stipple.pattern,
+         .cull_mode = dyn->rs.cull_mode,
+         .front_ccw = front_ccw,
       };
       for (uint32_t i = 0; i < dyn->vp.viewport_count; i++) {
          const VkViewport *vp = &dyn->vp.viewports[i];
@@ -1534,10 +1546,16 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
          xform[2] = vp->x + vp->width * 0.5f;
          xform[3] = vp->y + vp->height * 0.5f;
       }
-      desc->root.draw.line_stipple =
+      desc->root.draw.raster_data =
          kk_pool_upload(cmd, &data, sizeof(data), 16u).gpu;
       desc->root_dirty = true;
    }
+
+   /* VK_POLYGON_MODE_POINT is a geometry shader the pipeline has, see
+    * kk_create_polygon_point_gs */
+   if (IS_DIRTY(RS_POLYGON_MODE))
+      mtl_set_triangle_fill_mode(enc,
+                                 dyn->rs.polygon_mode == VK_POLYGON_MODE_LINE);
 
    if (IS_DIRTY(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)) {
       desc->root.draw.clip_z_coeff =
