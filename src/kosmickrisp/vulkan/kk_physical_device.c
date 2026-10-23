@@ -357,6 +357,8 @@ kk_get_device_features(
 
       /* Vulkan 1.4 */
       .bresenhamLines = true,
+      /* In the fragment shader, see kk_nir_lower_line_stipple */
+      .stippledBresenhamLines = true,
       .dynamicRenderingLocalRead = true,
       .globalPriorityQuery = true,
       .hostImageCopy = true,
