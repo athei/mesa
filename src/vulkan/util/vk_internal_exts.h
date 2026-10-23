@@ -82,6 +82,25 @@ struct wsi_surface_supported_counters {
 #define VK_STRUCTURE_TYPE_WSI_SURFACE_SUPPORTED_COUNTERS_MESA \
    (VkStructureType)1000001005
 
+/* Chained to VkPresentInfoKHR by a driver that implements another API on
+ * Vulkan, such as Zink: for each swapchain of the present, the swap interval
+ * of that API, the number of refresh cycles a FIFO present stays on screen
+ * at least, which Vulkan's FIFO has no way to say. A present without it, and
+ * an interval of 0 or 1, takes one refresh cycle. WSI backends that cannot
+ * honour it ignore it; the Metal one paces a FIFO present to the interval.
+ */
+typedef struct VkPresentIntervalsInfoMESA {
+   VkStructureType sType;
+   const void *pNext;
+   uint32_t swapchainCount;
+   const uint32_t *pIntervals;
+} VkPresentIntervalsInfoMESA;
+
+#define VK_STRUCTURE_TYPE_PRESENT_INTERVALS_INFO_MESA \
+   (VkStructureType)1000001006
+#define VK_STRUCTURE_TYPE_PRESENT_INTERVALS_INFO_MESA_cast \
+   VkPresentIntervalsInfoMESA
+
 #define VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA_cast \
    struct wsi_image_create_info
 #define VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA_cast \

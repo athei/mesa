@@ -322,6 +322,10 @@ struct wsi_swapchain {
                               const uint32_t *indices);
    void (*set_present_mode)(struct wsi_swapchain *swap_chain,
                             VkPresentModeKHR mode);
+   /* Called before every queue_present with the interval of
+    * VkPresentIntervalsInfoMESA for this present, or 1 without one. */
+   void (*set_present_interval)(struct wsi_swapchain *swap_chain,
+                                uint32_t interval);
    void (*set_hdr_metadata)(struct wsi_swapchain *swap_chain,
                             const VkHdrMetadataEXT* pMetadata);
    void (*set_timing_request)(struct wsi_swapchain *swap_chain,
