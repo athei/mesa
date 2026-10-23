@@ -658,6 +658,12 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
                        residency_gpu_resource_id)
             : offsetof(struct kk_sampled_image_descriptor,
                        image_gpu_resource_id);
+      if (tex->backend_flags & KK_TEXTURE_FLAG_CUBE_AS_ARRAY) {
+         assert(!tex->is_sparse && tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+                tex->is_array);
+         offs = offsetof(struct kk_sampled_image_descriptor,
+                         cube_array_gpu_resource_id);
+      }
 
       nir_def *resource_addr = load_resource_addr(
          b, 1, 64, nir_src_as_deref(nir_src_for_ssa(texture)),

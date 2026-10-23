@@ -201,6 +201,20 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
                mtl_texture_get_gpu_resource_id(
                   view->planes[view_plane].mtl_handle_sampled_residency);
          }
+
+         /* VK_EXT_non_seamless_cube_map samples a face as a 2D array layer
+          * (kk_nir_lower_non_seamless_cube) */
+         if (dev->vk.enabled_features.nonSeamlessCubeMap &&
+             (view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
+              view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)) {
+            struct kk_view_layout array_layout = view_layout;
+            array_layout.view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+            view->planes[view_plane].mtl_handle_sampled_cube_array =
+               mtl_new_texture_view_with(mtl_handle, &array_layout);
+            view->planes[view_plane].sampled_cube_array_gpu_resource_id =
+               mtl_texture_get_gpu_resource_id(
+                  view->planes[view_plane].mtl_handle_sampled_cube_array);
+         }
       }
 
       if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
@@ -312,6 +326,9 @@ kk_image_view_finish(struct kk_device *dev, struct kk_image_view *view)
       if (view->planes[plane].mtl_handle_storage_residency)
          mtl_release(view->planes[plane].mtl_handle_storage_residency);
 
+      if (view->planes[plane].mtl_handle_sampled_cube_array)
+         mtl_release(view->planes[plane].mtl_handle_sampled_cube_array);
+
       if (view->planes[plane].mtl_handle_input)
          mtl_release(view->planes[plane].mtl_handle_input);
 
@@ -369,6 +386,9 @@ kk_image_view_set_label(struct kk_image_view *iview, const char *label)
    for (uint8_t i = 0; i < iview->plane_count; i++) {
       if (iview->planes[i].mtl_handle_sampled)
          mtl_resource_set_label(iview->planes[i].mtl_handle_sampled, label);
+      if (iview->planes[i].mtl_handle_sampled_cube_array)
+         mtl_resource_set_label(iview->planes[i].mtl_handle_sampled_cube_array,
+                                label);
       if (iview->planes[i].mtl_handle_storage)
          mtl_resource_set_label(iview->planes[i].mtl_handle_storage, label);
       if (iview->planes[i].mtl_handle_subres)

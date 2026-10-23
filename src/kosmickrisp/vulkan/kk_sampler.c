@@ -268,6 +268,9 @@ kk_CreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
       (pCreateInfo->compareEnable
           ? (pCreateInfo->compareOp & KK_SAMPLER_COMPARE_OP_MASK)
                << KK_SAMPLER_COMPARE_OP_SHIFT
+          : 0) |
+      ((pCreateInfo->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT)
+          ? KK_SAMPLER_NON_SEAMLESS_CUBE
           : 0);
 
    const VkSamplerReductionModeCreateInfo *reduction_info =
