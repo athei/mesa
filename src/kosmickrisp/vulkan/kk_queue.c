@@ -160,6 +160,10 @@ rerecord_and_commit_cmd_buffer(struct kk_queue *queue,
    if (result != VK_SUCCESS)
       goto release;
 
+   /* The drawable is not part of the recorded commands. */
+   if (cmd->drawable)
+      mtl_command_buffer_use_drawable_residency(rerecord->metal.cmd_buf,
+                                                cmd->drawable);
    vk_cmd_queue_execute(&cmd->vk.cmd_queue, rerecord_handle,
                         &dev->vk.dispatch_table);
 
