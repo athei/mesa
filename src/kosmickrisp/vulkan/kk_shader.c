@@ -110,6 +110,7 @@ has_static_depth_stencil_state(const struct vk_graphics_pipeline_state *state)
 struct kk_vs_key {
    enum mesa_prim prim;
    struct vk_vertex_input_state vi;
+   bool line_stipple;
 };
 
 static enum mesa_prim
@@ -127,6 +128,7 @@ kk_populate_vs_key(struct kk_vs_key *key,
    memset(key, 0, sizeof(*key));
    key->prim = kk_assembled_prim(state);
    key->vi = *state->vi;
+   key->line_stipple = state->rs && state->rs->line.stipple.enable;
 }
 
 struct kk_fs_key {
@@ -141,6 +143,7 @@ struct kk_fs_key {
    bool has_depth;
    bool has_stencil;
    bool dynamic_input_attachment_map;
+   bool line_stipple;
    uint8_t depth_input_att;
    uint8_t stencil_input_att;
 };
@@ -184,6 +187,9 @@ kk_populate_fs_key(struct kk_fs_key *key,
       state->ial ? state->ial->stencil_att : MESA_VK_ATTACHMENT_NO_INDEX;
    key->dynamic_input_attachment_map =
       BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP);
+
+   /* Discards in the shader, see kk_nir_lower_line_stipple */
+   key->line_stipple = state->rs && state->rs->line.stipple.enable;
 }
 
 enum kk_feature_key {
@@ -1396,6 +1402,36 @@ gather_flat_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
+gather_input_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input &&
+       intr->intrinsic != nir_intrinsic_load_interpolated_input)
+      return false;
+
+   uint8_t *masks = data;
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   unsigned mask =
+      BITFIELD_RANGE(nir_intrinsic_component(intr), intr->def.num_components) &
+      0xf;
+   for (unsigned i = 0; i < sem.num_slots; i++)
+      masks[sem.location + i] |= mask;
+   return false;
+}
+
+/* The input components a fragment shader reads */
+static unsigned
+kk_fs_input_components(nir_shader *fs)
+{
+   uint8_t masks[NUM_TOTAL_VARYING_SLOTS] = {0};
+   nir_shader_intrinsics_pass(fs, gather_input_components, nir_metadata_all,
+                              masks);
+   unsigned count = 0;
+   for (unsigned i = 0; i < NUM_TOTAL_VARYING_SLOTS; i++)
+      count += util_bitcount(masks[i]);
+   return count;
+}
+
+static bool
 kk_gather_flat_inputs(nir_shader *fs, uint8_t *flat)
 {
    memset(flat, 0, NUM_TOTAL_VARYING_SLOTS);
@@ -2533,6 +2569,40 @@ kk_create_passthrough_gs(struct kk_device *dev, nir_shader *prev,
    return gs;
 }
 
+/* Whether the pipeline rasterizes lines with line stipple. The stipple is
+ * only allowed for Bresenham lines, which are all the stippled lines this
+ * driver has. nir holds the linked stages, the fragment shader last. */
+static bool
+kk_rasterizes_stippled_lines(const struct vk_graphics_pipeline_state *state,
+                             nir_shader **nir, uint32_t count)
+{
+   if (!state || !state->rs || !state->rs->line.stipple.enable || count < 2u)
+      return false;
+
+   const nir_shader *last = nir[count - 2u];
+   switch (last->info.stage) {
+   case MESA_SHADER_GEOMETRY:
+      return u_reduced_prim(last->info.gs.output_primitive) == MESA_PRIM_LINES;
+   case MESA_SHADER_TESS_EVAL: {
+      enum tess_primitive_mode mode = TESS_PRIMITIVE_UNSPECIFIED;
+      bool point_mode = false;
+      for (uint32_t i = 0; i < count; i++) {
+         if (nir[i]->info.stage == MESA_SHADER_TESS_CTRL ||
+             nir[i]->info.stage == MESA_SHADER_TESS_EVAL) {
+            if (nir[i]->info.tess._primitive_mode != TESS_PRIMITIVE_UNSPECIFIED)
+               mode = nir[i]->info.tess._primitive_mode;
+            point_mode |= nir[i]->info.tess.point_mode;
+         }
+      }
+      return mode == TESS_PRIMITIVE_ISOLINES && !point_mode;
+   }
+   case MESA_SHADER_VERTEX:
+      return state->ia && kk_assembled_prim(state) == MESA_PRIM_LINES;
+   default:
+      return false;
+   }
+}
+
 static VkResult
 kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
@@ -2648,12 +2718,53 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
    nir_opt_varyings_bulk(nir_shaders, total_shaders, true, UINT32_MAX,
                          UINT32_MAX, nir_opts, NULL);
 
+   /* After linking, on slots the linked stages leave free */
+   int stipple_start_slot = -1;
+   bool fs_uses_flat = false;
+   if (kk_rasterizes_stippled_lines(state, nir_shaders, total_shaders)) {
+      nir_shader *last = nir_shaders[total_shaders - 2u];
+      nir_shader *fs = nir_shaders[total_shaders - 1u];
+      nir_shader_gather_info(last, nir_shader_get_entrypoint(last));
+      nir_shader_gather_info(fs, nir_shader_get_entrypoint(fs));
+      fs_uses_flat = fs_uses_flat_varying(fs);
+
+      uint64_t used = last->info.outputs_written | fs->info.inputs_read;
+      int slots[2] = {-1, -1};
+      for (int slot = VARYING_SLOT_VAR31, n = 0;
+           slot >= VARYING_SLOT_VAR0 && n < 2; slot--) {
+         if (!(used & BITFIELD64_BIT(slot)))
+            slots[n++] = slot;
+      }
+
+      /* The two outputs add four input components to the fragment shader */
+      if (slots[1] >= 0 &&
+          kk_fs_input_components(fs) + 4u <=
+             pdev->vk.properties.maxFragmentInputComponents) {
+         stipple_start_slot = slots[0];
+         kk_nir_lower_line_stipple_output(last, slots[0], slots[1]);
+         kk_nir_lower_line_stipple_fs(
+            fs, slots[0], slots[1],
+            !(pdev->settings.disabled_workarounds & BITFIELD64_BIT(4)));
+      } else {
+         mesa_logw("kk: no varyings left for line stipple");
+      }
+   }
+
    uint8_t flat_inputs[NUM_TOTAL_VARYING_SLOTS];
    bool vs_needs_flat =
       state && total_shaders == 2u &&
       nir_shaders[0]->info.stage == MESA_SHADER_VERTEX &&
       nir_shaders[1]->info.stage == MESA_SHADER_FRAGMENT &&
       kk_gather_flat_inputs(nir_shaders[1], flat_inputs);
+
+   /* The line stipple start is taken from the first vertex of the segment,
+    * not the provoking vertex */
+   if (vs_needs_flat && stipple_start_slot >= 0) {
+      flat_inputs[stipple_start_slot] = 0;
+      vs_needs_flat = false;
+      for (unsigned i = 0; i < NUM_TOTAL_VARYING_SLOTS; i++)
+         vs_needs_flat |= flat_inputs[i] != 0;
+   }
 
    for (uint32_t i = 0; i < total_shaders; i++) {
       struct kk_shader *prev_stage = i > 0 ? shaders[i - 1] : NULL;
@@ -2676,6 +2787,14 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
 
          return result;
       }
+   }
+
+   /* The line stipple start alone does not need the provoking vertex
+    * unrolled */
+   if (stipple_start_slot >= 0) {
+      shaders[total_shaders - 1u]->info.fs.uses_flat_varyings = fs_uses_flat;
+      assert(shaders[0]->info.stage == MESA_SHADER_VERTEX);
+      shaders[0]->info.vs.line_stipple = true;
    }
 
    /* Compile pipeline:

@@ -27,6 +27,13 @@
 
 struct kk_query_pool;
 
+/* What kk_nir_lower_line_stipple reads: the scale (x, y) and offset (x, y)
+ * of each viewport transform, and the stipple factor << 16 | the pattern */
+struct kk_line_stipple_data {
+   float viewport_xform[KK_MAX_VIEWPORTS * 4];
+   uint32_t stipple;
+};
+
 struct kk_root_descriptor_table {
    uint64_t addr;
 
@@ -43,6 +50,10 @@ struct kk_root_descriptor_table {
          float viewport_z_range[KK_MAX_VIEWPORTS * 2];
          bool emulate_depth_clamp;
          bool emulate_viewport_z;
+
+         /* struct kk_line_stipple_data, uploaded for pipelines with line
+          * stipple only */
+         uint64_t line_stipple;
       } draw;
       struct {
          uint32_t base_group[3];
