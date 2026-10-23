@@ -151,16 +151,21 @@ get_color_space_info(VkColorSpaceKHR color_space, CGColorSpaceRef *cg_color_spac
    return VK_SUCCESS;
 }
 
-/* The highest refresh rate in Hz of the screen showing the layer, or 0 when
- * no screen reports one. Main thread only: the walk goes through the view
- * and the window that host the layer, which only the main thread may touch.
+/* Looks at the screen and the window showing the layer: the highest refresh
+ * rate in Hz of the screen, or 0 when no screen reports one, and whether
+ * the window is minimized or not visible (ordered out, as a hidden window
+ * is), which shows none of the layer's frames. Main thread only: the walk
+ * goes through the view and the window that host the layer, which only the
+ * main thread may touch.
  *
  * AppKit is looked up rather than linked. A process that never loaded it has
  * no views and no screens to ask.
  */
 static uint32_t
-screen_max_refresh_rate(const CAMetalLayer *metal_layer)
+screen_max_refresh_rate(const CAMetalLayer *metal_layer, bool *window_hidden)
 {
+   *window_hidden = false;
+
    Class view_class = objc_getClass("NSView");
    Class screen_class = objc_getClass("NSScreen");
    if (!view_class || !screen_class)
@@ -172,7 +177,9 @@ screen_max_refresh_rate(const CAMetalLayer *metal_layer)
    for (CALayer *layer = (CALayer *)metal_layer; layer; layer = layer.superlayer) {
       id delegate = layer.delegate;
       if ([delegate isKindOfClass:view_class]) {
-         screen = ((NSView *)delegate).window.screen;
+         NSWindow *window = ((NSView *)delegate).window;
+         *window_hidden = window && (window.miniaturized || !window.visible);
+         screen = window.screen;
          break;
       }
    }
@@ -188,12 +195,14 @@ screen_max_refresh_rate(const CAMetalLayer *metal_layer)
 
 void
 wsi_metal_layer_query_refresh_rate(const CAMetalLayer *metal_layer,
-                                   void (*refresh_rate_handler)(void *, uint32_t),
+                                   void (*refresh_rate_handler)(void *, uint32_t, bool),
                                    void *data)
 {
    if ([NSThread isMainThread]) {
       @autoreleasepool {
-         refresh_rate_handler(data, screen_max_refresh_rate(metal_layer));
+         bool hidden;
+         uint32_t rate = screen_max_refresh_rate(metal_layer, &hidden);
+         refresh_rate_handler(data, rate, hidden);
       }
       return;
    }
@@ -201,7 +210,9 @@ wsi_metal_layer_query_refresh_rate(const CAMetalLayer *metal_layer,
    CAMetalLayer *layer = [(CAMetalLayer *)metal_layer retain];
    dispatch_async(dispatch_get_main_queue(), ^{
       @autoreleasepool {
-         refresh_rate_handler(data, screen_max_refresh_rate(layer));
+         bool hidden;
+         uint32_t rate = screen_max_refresh_rate(layer, &hidden);
+         refresh_rate_handler(data, rate, hidden);
       }
       [layer release];
    });
@@ -354,6 +365,66 @@ wsi_metal_release_drawable(CAMetalDrawable *drawable_ptr)
    [(id<CAMetalDrawable>)drawable_ptr release];
 }
 
+void *
+wsi_metal_create_fetch_queue(void)
+{
+   dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+      DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+   return dispatch_queue_create("org.mesa3d.wsi.metal.fetch", attr);
+}
+
+void
+wsi_metal_release_fetch_queue(void *queue)
+{
+   /* A fetch still queued holds its own reference to the queue. */
+   dispatch_release((dispatch_queue_t)queue);
+}
+
+void
+wsi_metal_layer_fetch_drawable(void *queue, const CAMetalLayer *metal_layer,
+                               void (*done)(void *, CAMetalDrawable *),
+                               void *data)
+{
+   CAMetalLayer *layer = [(CAMetalLayer *)metal_layer retain];
+   dispatch_async((dispatch_queue_t)queue, ^{
+      done(data, wsi_metal_layer_acquire_drawable(layer));
+      [layer release];
+   });
+}
+
+/* What a presented handler block captures. Metal may release a handler
+ * block without calling it, and then nothing else would tell the swapchain
+ * that the present is over, so the object calls the handler when it is
+ * freed if the block did not. Either way the handler runs exactly once:
+ * the block holds the only other reference, so it has returned before the
+ * object is freed. */
+@interface MesaWsiMetalPresentedToken : NSObject {
+@public
+   void (*handler)(void *, uint64_t, bool, double);
+   void *data;
+   uint64_t present_id;
+   bool paced;
+   bool called;
+}
+- (void)callWithPresentedTime:(double)presented_time;
+@end
+
+@implementation MesaWsiMetalPresentedToken
+- (void)callWithPresentedTime:(double)presented_time
+{
+   if (called)
+      return;
+   called = true;
+   handler(data, present_id, paced, presented_time);
+}
+
+- (void)dealloc
+{
+   [self callWithPresentedTime:-1.0];
+   [super dealloc];
+}
+@end
+
 void
 wsi_metal_layer_add_presented_handler(CAMetalDrawable *drawable_ptr,
                                       void (*presented_handler)(void *, uint64_t,
@@ -363,9 +434,17 @@ wsi_metal_layer_add_presented_handler(CAMetalDrawable *drawable_ptr,
 {
    @autoreleasepool {
       id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
+      MesaWsiMetalPresentedToken *token =
+         [[MesaWsiMetalPresentedToken alloc] init];
+      token->handler = presented_handler;
+      token->data = data;
+      token->present_id = present_id;
+      token->paced = paced;
       [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
-         presented_handler(data, present_id, paced, mtlDrwbl.presentedTime);
+         [token callWithPresentedTime:mtlDrwbl.presentedTime];
       }];
+      /* The block copy addPresentedHandler: made holds the token now. */
+      [token release];
    }
 }
 
