@@ -2878,6 +2878,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_REGIONS_KHR);
    const VkSwapchainPresentModeInfoKHR *present_mode_info =
       vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_MODE_INFO_KHR);
+   const VkPresentIntervalsInfoMESA *present_intervals =
+      vk_find_struct_const(pPresentInfo->pNext, PRESENT_INTERVALS_INFO_MESA);
 
    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
       VK_FROM_HANDLE(wsi_swapchain, swapchain, pPresentInfo->pSwapchains[i]);
@@ -2895,6 +2897,17 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       if (present_mode_info && present_mode_info->pPresentModes &&
           swapchain->set_present_mode && wsi->override_present_mode == VK_PRESENT_MODE_MAX_ENUM_KHR) {
          swapchain->set_present_mode(swapchain, present_mode_info->pPresentModes[i]);
+      }
+
+      /* The swap interval applies to this present only. */
+      if (swapchain->set_present_interval) {
+         uint32_t interval = 1;
+         if (present_intervals && present_intervals->pIntervals) {
+            assert(present_intervals->swapchainCount ==
+                   pPresentInfo->swapchainCount);
+            interval = present_intervals->pIntervals[i];
+         }
+         swapchain->set_present_interval(swapchain, interval);
       }
 
       /* The app can only submit images they have acquired. */

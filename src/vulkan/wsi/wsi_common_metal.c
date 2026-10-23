@@ -468,6 +468,10 @@ struct wsi_metal_swapchain {
     * time, or 0 before the first hold. */
    int64_t unshown_release_ns;
 
+   /* The swap interval of the present being queued, from
+    * VkPresentIntervalsInfoMESA, at least 1. */
+   uint32_t present_interval;
+
    uint32_t current_image_index;
    /* The image of the newest present, UINT32_MAX before the first. */
    uint32_t last_presented_index;
@@ -996,6 +1000,14 @@ wsi_metal_swapchain_set_present_mode(struct wsi_swapchain *wsi_chain,
 }
 
 static void
+wsi_metal_swapchain_set_present_interval(struct wsi_swapchain *wsi_chain,
+                                         uint32_t interval)
+{
+   struct wsi_metal_swapchain *chain = (struct wsi_metal_swapchain *)wsi_chain;
+   chain->present_interval = MAX2(interval, 1);
+}
+
+static void
 wsi_metal_refresh_rate_complete(void *present_info_ptr, uint32_t refresh_rate,
                                 bool window_hidden)
 {
@@ -1030,11 +1042,13 @@ wsi_metal_swapchain_query_refresh_rate(struct wsi_metal_swapchain *chain)
 
 /* How long after the previous frame was shown this present may be shown, in
  * seconds. Display sync is off, so this is what keeps FIFO presents to one
- * per refresh of the screen. On a variable refresh rate screen it caps the
- * rate at the screen's maximum and, when the layer goes straight to the
- * display, lets the screen follow anything slower. The other FIFO variants
- * are paced the same way, should the surface ever offer them; the other
- * modes present as soon as they can. */
+ * per refresh of the screen, or to one per swap interval of refreshes when
+ * the present carries a VkPresentIntervalsInfoMESA. On a variable refresh
+ * rate screen it caps the rate at the screen's maximum divided by the
+ * interval and, when the layer goes straight to the display, lets the
+ * screen follow anything slower. The other FIFO variants are paced the same
+ * way, should the surface ever offer them; the other modes present as soon
+ * as they can. */
 static double
 wsi_metal_swapchain_min_present_duration(const struct wsi_metal_swapchain *chain)
 {
@@ -1042,7 +1056,8 @@ wsi_metal_swapchain_min_present_duration(const struct wsi_metal_swapchain *chain
    case VK_PRESENT_MODE_FIFO_KHR:
    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
    case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR:
-      return 1.0 / p_atomic_read(&chain->present_info->refresh_rate);
+      return (double)chain->present_interval /
+             p_atomic_read(&chain->present_info->refresh_rate);
    default:
       return 0.0;
    }
@@ -1431,6 +1446,7 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.acquire_next_image = wsi_metal_swapchain_acquire_next_image;
    chain->base.release_images = wsi_metal_swapchain_release_images;
    chain->base.set_present_mode = wsi_metal_swapchain_set_present_mode;
+   chain->base.set_present_interval = wsi_metal_swapchain_set_present_interval;
    chain->base.queue_present = wsi_metal_swapchain_queue_present;
    chain->base.wait_for_present = wsi_metal_swapchain_wait_for_present;
    chain->base.wait_for_present2 = wsi_metal_swapchain_wait_for_present;
@@ -1443,6 +1459,7 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->current_image_index = 0;
    chain->last_presented_index = UINT32_MAX;
    chain->opaque_composition = opaque_composition;
+   chain->present_interval = 1;
 
    /* The swapchain this one replaces on the same layer may still have
     * drawables of the layer held by the compositor; both count them in one
