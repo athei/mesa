@@ -32,7 +32,9 @@ struct kk_sampled_image_descriptor {
    uint16_t image_flags;
    uint16_t pad16;
    float sampler_lod_bias;
-   uint64_t pad_to_power_2;
+   /* The faces of a cube view as a 2D array, see
+    * kk_nir_lower_non_seamless_cube */
+   uint64_t cube_array_gpu_resource_id;
 };
 
 static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,

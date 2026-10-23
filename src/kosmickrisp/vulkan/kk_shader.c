@@ -192,6 +192,7 @@ enum kk_feature_key {
    KK_FEAT_IMAGE_VIEW_MIN_LOD = BITFIELD_BIT(2),
    KK_FEAT_SAMPLER_MINMAX = BITFIELD_BIT(3),
    KK_FEAT_SPARSE_RESIDENCY = BITFIELD_BIT(4),
+   KK_FEAT_NON_SEAMLESS_CUBE = BITFIELD_BIT(5),
 };
 
 static enum kk_feature_key
@@ -209,6 +210,8 @@ kk_make_feature_key(const struct kk_physical_device *pdev,
       key |= KK_FEAT_NULL_DESCRIPTOR;
    if (feats->minLod)
       key |= KK_FEAT_IMAGE_VIEW_MIN_LOD;
+   if (feats->nonSeamlessCubeMap)
+      key |= KK_FEAT_NON_SEAMLESS_CUBE;
    return key;
 }
 
@@ -1171,6 +1174,11 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       kk_lower_fs(dev, nir, state);
    }
+
+   /* Before the passes that clone texture instructions, so they handle both
+    * of the samples it makes */
+   if (features & KK_FEAT_NON_SEAMLESS_CUBE)
+      NIR_PASS(_, nir, kk_nir_lower_non_seamless_cube);
 
    if (features & KK_FEAT_CUSTOM_BORDER)
       NIR_PASS(_, nir, kk_nir_lower_custom_border);

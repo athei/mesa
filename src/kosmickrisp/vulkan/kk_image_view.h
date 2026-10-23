@@ -48,7 +48,12 @@ struct kk_image_view {
       mtl_texture *mtl_handle_sampled_residency;
       mtl_texture *mtl_handle_storage_residency;
 
+      /* The faces of a sampled cube or cube array view as a 2D array, for
+       * samplers without seamless cube map filtering */
+      mtl_texture *mtl_handle_sampled_cube_array;
+
       uint64_t sampled_gpu_resource_id;
+      uint64_t sampled_cube_array_gpu_resource_id;
       uint64_t storage_gpu_resource_id;
       uint64_t sampled_residency_gpu_resource_id;
       uint64_t storage_residency_gpu_resource_id;

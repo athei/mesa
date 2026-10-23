@@ -193,6 +193,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_multi_draw = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_nested_command_buffer = true,
+      .EXT_non_seamless_cube_map = true,
       .EXT_post_depth_coverage = true,
       .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
@@ -512,6 +513,9 @@ kk_get_device_features(
       .nestedCommandBuffer = true,
       .nestedCommandBufferRendering = true,
       .nestedCommandBufferSimultaneousUse = true,
+
+      /* VK_EXT_non_seamless_cube_map */
+      .nonSeamlessCubeMap = true,
 
       /* VK_EXT_primitive_restart_index */
       .primitiveRestartIndex = true,

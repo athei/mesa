@@ -82,6 +82,8 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
                view->planes[plane].sampled_gpu_resource_id;
             desc[plane].residency_gpu_resource_id =
                view->planes[plane].sampled_residency_gpu_resource_id;
+            desc[plane].cube_array_gpu_resource_id =
+               view->planes[plane].sampled_cube_array_gpu_resource_id;
          }
 
          float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);

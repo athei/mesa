@@ -209,6 +209,8 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 /* Indicates that the sampler should be overridden to clamp to 0 instead of 1 */
 #define KK_TEXTURE_FLAG_CLAMP_TO_0 (1 << 0)
 #define KK_TEXTURE_FLAG_MINMAX_DONE (1 << 1)
+/* Samples the 2D array view of a cube view's faces */
+#define KK_TEXTURE_FLAG_CUBE_AS_ARRAY (1 << 2)
 
 #define KK_SAMPLER_MINMAX_MODE_MASK  0x3
 #define KK_SAMPLER_MINMAX_MIN        0x1
@@ -219,10 +221,12 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 #define KK_SAMPLER_MINMAX_UNNORMALIZED 0x20
 #define KK_SAMPLER_COMPARE_OP_SHIFT 6
 #define KK_SAMPLER_COMPARE_OP_MASK  0x7
+#define KK_SAMPLER_NON_SEAMLESS_CUBE 0x200
 
 #define KK_IMAGE_FLAG_UNORM_DEPTH 0x1
 
 bool kk_nir_lower_custom_border(nir_shader *nir);
+bool kk_nir_lower_non_seamless_cube(nir_shader *nir);
 bool kk_nir_lower_compute_derivatives(nir_shader *nir);
 bool kk_nir_lower_compute_lod_queries(nir_shader *nir);
 #define KK_ATOMIC64_BUFFER      0
