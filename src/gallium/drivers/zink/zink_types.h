@@ -951,6 +951,12 @@ struct zink_gfx_pipeline_state {
    uint32_t rp_state : 16;
    VkSampleMask sample_mask;
    uint32_t blend_id;
+   /* per-sample invocations required by the depth-bias lowering
+    * (zink_update_fs_key_depth_bias), kept apart from
+    * force_persample_interp so the rasterizer-state sync only ever tracks
+    * what the app requested. Only reachable while optimal keys, and with
+    * them GPL which keys the output section without this field, are off. */
+   bool depth_bias_persample;
 
    /* Pre-hashed value for table lookup, invalid when zero.
     * Members after this point are not included in pipeline state hash key */
@@ -1040,6 +1046,7 @@ struct zink_gfx_push_constant {
    uint32_t line_stipple_pattern;
    float viewport_scale[2];
    float line_width;
+   float depth_bias[3]; /* constant term, slope scale, clamp */
 };
 
 /* The order of the enums MUST match the order of the zink_gfx_push_constant
@@ -1054,6 +1061,7 @@ enum zink_gfx_push_constant_member {
    ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN,
    ZINK_GFX_PUSHCONST_VIEWPORT_SCALE,
    ZINK_GFX_PUSHCONST_LINE_WIDTH,
+   ZINK_GFX_PUSHCONST_DEPTH_BIAS,
    ZINK_GFX_PUSHCONST_MAX
 };
 
@@ -1640,6 +1648,8 @@ struct zink_screen {
       bool track_renderpasses;
       bool no_linestipple;
       bool no_linesmooth;
+      /* advertises sampleRateShading but ignores sampleShadingEnable */
+      bool no_pipeline_sample_shading;
       bool can_do_invalid_linear_modifier;
       bool inconsistent_interpolation;
       bool can_2d_view_sparse;

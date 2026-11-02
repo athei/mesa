@@ -131,7 +131,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
     * data here as long as sample_mask is initialized on context creation
     */
    ms_state.pSampleMask = &state->sample_mask;
-   if (state->force_persample_interp) {
+   if (state->force_persample_interp || state->depth_bias_persample) {
       ms_state.sampleShadingEnable = VK_TRUE;
       ms_state.minSampleShading = 1.0;
    } else if (state->min_samples > 0) {
@@ -529,7 +529,7 @@ zink_create_gfx_pipeline_output(struct zink_screen *screen, struct zink_gfx_pipe
 
    VkPipelineMultisampleStateCreateInfo ms_state = {0};
    ms_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-   if (state->force_persample_interp) {
+   if (state->force_persample_interp || state->depth_bias_persample) {
       ms_state.sampleShadingEnable = VK_TRUE;
       ms_state.minSampleShading = 1.0;
    } else if (state->min_samples > 0) {

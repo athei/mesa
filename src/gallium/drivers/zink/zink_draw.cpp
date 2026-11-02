@@ -502,12 +502,30 @@ emit_dynamic_atoms(struct zink_context *ctx, uint32_t atoms, unsigned num_viewpo
          }
          break;
       }
-      case ZINK_ATOM_DEPTH_BIAS:
-         if (ctx->was_using_depth_bias)
+      case ZINK_ATOM_DEPTH_BIAS: {
+         const bool shader_bias =
+            !zink_screen(ctx->base.screen)->optimal_keys &&
+            zink_get_fs_key(ctx)->lower_depth_bias;
+         if (shader_bias) {
+            /* D24-on-float emulation: all three terms are applied in the
+             * shader (see lower_depth_bias_fs) -- a hardware bias never
+             * reaches a depth the shader writes, and D3D clamps the sum. */
+            float bias[3] = {
+               ctx->was_using_depth_bias ? rast_state->offset_units / 16777216.0f : 0.0f,
+               ctx->was_using_depth_bias ? rast_state->offset_scale : 0.0f,
+               ctx->was_using_depth_bias ? rast_state->offset_clamp : 0.0f,
+            };
+            VKCTX(CmdSetDepthBias)(bs->cmdbuf, 0.0f, 0.0f, 0.0f);
+            VKCTX(CmdPushConstants)(bs->cmdbuf, ctx->curr_program->base.layout,
+                                    VK_SHADER_STAGE_ALL_GRAPHICS,
+                                    offsetof(struct zink_gfx_push_constant, depth_bias),
+                                    sizeof(bias), bias);
+         } else if (ctx->was_using_depth_bias)
             VKCTX(CmdSetDepthBias)(bs->cmdbuf, rast_state->offset_units, rast_state->offset_clamp, rast_state->offset_scale);
          else
             VKCTX(CmdSetDepthBias)(bs->cmdbuf, 0.0f, 0.0f, 0.0f);
          break;
+      }
       case ZINK_ATOM_LINE_WIDTH:
          VKCTX(CmdSetLineWidth)(bs->cmdbuf, rast_state->line_width);
          break;
@@ -994,6 +1012,7 @@ zink_draw_atoms(struct zink_context *ctx,
                zink_gfx_pipeline_state_dirty(ctx);
             }
 
+            zink_update_fs_key_depth_bias(ctx);
             bool using_depth_bias = zink_prim_type(ctx, dinfo) == MESA_PRIM_TRIANGLES && rast_state->offset_fill;
             if (using_depth_bias != ctx->was_using_depth_bias) {
                ctx->was_using_depth_bias = using_depth_bias;
@@ -1363,6 +1382,7 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
          return;
    }
 
+   zink_update_fs_key_depth_bias(ctx);
    bool using_depth_bias = !!ctx->rast_state->offset_fill;
    if (using_depth_bias != ctx->was_using_depth_bias) {
       ctx->was_using_depth_bias = using_depth_bias;

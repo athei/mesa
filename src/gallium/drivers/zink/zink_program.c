@@ -2204,6 +2204,55 @@ zink_update_fs_key_samples(struct zink_context *ctx)
    }
 }
 
+void
+zink_update_fs_key_depth_bias(struct zink_context *ctx)
+{
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   if (screen->optimal_keys || !ctx->gfx_stages[MESA_SHADER_FRAGMENT])
+      return;
+
+   /* D24 emulated on float depth: the bias has to be applied in the shader,
+    * see lower_depth_bias_fs(). Two classes of shader keep the hardware bias
+    * instead: those requesting early fragment tests, whose test runs before
+    * shading and must see the offset (clearing that mode would let stores and
+    * atomics escape fragments that fail depth/stencil testing), and
+    * multisampled draws whose appended store would collapse every sample's
+    * depth unless per-sample invocations keep them distinct: the
+    * sampleRateShading feature promises that, but devices quirked as
+    * ignoring sampleShadingEnable cannot deliver it, and those keep
+    * the hardware offset instead. */
+   struct zink_shader *fs = ctx->gfx_stages[MESA_SHADER_FRAGMENT];
+   bool lower = false;
+   struct pipe_resource *zs = ctx->fb_state.zsbuf.texture;
+   if (zs && ctx->rast_state && ctx->rast_state->offset_fill &&
+       ctx->rast_state->offset_units != 0.0f &&
+       !fs->info.fs.early_fragment_tests &&
+       (ctx->fb_state.samples <= 1 ||
+        (fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) ||
+        (screen->info.feats.features.sampleRateShading &&
+         !screen->driver_workarounds.no_pipeline_sample_shading))) {
+      if (zs->format == PIPE_FORMAT_Z24_UNORM_S8_UINT)
+         lower = !screen->have_D24_UNORM_S8_UINT;
+      else if (zs->format == PIPE_FORMAT_Z24X8_UNORM)
+         lower = !screen->have_X8_D24_UNORM_PACK32;
+   }
+   if (zink_get_fs_key(ctx)->lower_depth_bias != lower) {
+      zink_set_fs_key(ctx)->lower_depth_bias = lower;
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
+   }
+
+   /* When the lowering appends the depth store, one invocation's value would
+    * replace every covered sample's depth, so multisampled framebuffers need
+    * per-sample invocations; that is pipeline state, tracked separately from
+    * the app's force_persample_interp. */
+   bool per_sample = lower && ctx->fb_state.samples > 1 &&
+      !(fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH));
+   if (ctx->gfx_pipeline_state.depth_bias_persample != per_sample) {
+      ctx->gfx_pipeline_state.depth_bias_persample = per_sample;
+      zink_gfx_pipeline_state_dirty(ctx);
+   }
+}
+
 void zink_update_gs_key_rectangular_line(struct zink_context *ctx)
 {
    bool line_rectangular = zink_get_gs_key(ctx)->line_rectangular;
@@ -2241,6 +2290,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
          ctx->fbfetch_outputs |= info->outputs_read >> FRAG_RESULT_DATA0;
       }
       zink_update_fs_key_samples(ctx);
+      zink_update_fs_key_depth_bias(ctx);
       if (zink_screen(pctx->screen)->info.have_EXT_rasterization_order_attachment_access) {
          if (ctx->gfx_pipeline_state.rast_attachment_order != info->fs.uses_fbfetch_output)
             zink_gfx_mesh_pipeline_state_dirty(ctx);

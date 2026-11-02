@@ -3212,6 +3212,13 @@ init_driver_workarounds(struct zink_screen *screen)
                                                          screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
                                                          screen->is_cpu);
    screen->driver_workarounds.broken_l4a4 = zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+   /* KosmicKrisp advertises sampleRateShading, which wined3d's gl_SampleID
+    * emission keys the ARB_sample_shading extension off, but never reads
+    * pMultisampleState->sampleShadingEnable: Metal invokes a fragment
+    * shader per sample only when it references sample builtins, so
+    * pipeline-forced per-sample invocations do nothing there */
+   screen->driver_workarounds.no_pipeline_sample_shading =
+      zink_driverid(screen) == VK_DRIVER_ID_MESA_KOSMICKRISP;
    if (zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) {
       /* performance */
       screen->info.border_color_feats.customBorderColorWithoutFormat = VK_FALSE;
@@ -3468,7 +3475,11 @@ init_optimal_keys(struct zink_screen *screen)
                           screen->info.maint5_props.polygonModePointSize &&
                           !screen->driver_compiler_workarounds.lower_robustImageAccess2 &&
                           !screen->driconf.emulate_point_smooth &&
-                          !screen->driver_compiler_workarounds.needs_zs_shader_swizzle;
+                          !screen->driver_compiler_workarounds.needs_zs_shader_swizzle &&
+                          /* depth bias for fixed-point depth formats emulated on float
+                           * depth needs an fs key lowering optimal keys can't express */
+                          (screen->have_D24_UNORM_S8_UINT &&
+                           screen->have_X8_D24_UNORM_PACK32);
    if (!screen->optimal_keys && zink_debug & ZINK_DEBUG_OPTIMAL_KEYS && !(zink_debug & ZINK_DEBUG_QUIET)) {
       fprintf(stderr, "The following criteria are preventing optimal_keys enablement:\n");
       if (screen->need_decompose_attrs)

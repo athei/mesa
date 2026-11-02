@@ -4507,6 +4507,7 @@ zink_set_framebuffer_state(struct pipe_context *pctx,
    ctx->fb_state.samples = MAX2(samples, 1);
    if (ctx->fb_state.width != w || ctx->fb_state.height != h)
       zink_mark_atom_dirty(ctx, ZINK_ATOM_SCISSOR);
+   zink_update_fs_key_depth_bias(ctx);
 
    uint8_t rast_samples = ctx->fb_state.samples - 1;
    if (rast_samples != ctx->gfx_pipeline_state.rast_samples) {
