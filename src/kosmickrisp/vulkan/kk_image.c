@@ -70,10 +70,7 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
        vk_format != VK_FORMAT_A8_UNORM) {
       features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
       features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
-      // TODO_KOSMICKRISP Support snorm formats once the following spec issue is
-      // resolved: https://gitlab.khronos.org/vulkan/vulkan/-/issues/4293
-      if (!vk_format_is_snorm(vk_format))
-         features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
+      features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
    }
 
    if (vk_format_is_depth_or_stencil(vk_format)) {
