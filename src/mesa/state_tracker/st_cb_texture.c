@@ -2255,19 +2255,21 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
       goto fallback;
    }
 
+   /* See if the texture format already matches the format and type,
+    * in which case the memcpy-based fast path will likely be used and
+    * we don't have to blit. Check this before the PBO path: that path
+    * draws with a shader, which can change NaN payloads, while the CPU
+    * path copies texels unchanged. */
+   if (_mesa_format_matches_format_and_type(texImage->TexFormat, format,
+                                            type, unpack->SwapBytes, NULL) && !is_ms) {
+      goto fallback;
+   }
+
    if (unpack->BufferObj) {
       if (try_pbo_upload(ctx, dims, texImage, format, type, dst_format,
                          xoffset, yoffset, zoffset,
                          width, height, depth, pixels, unpack))
          return;
-   }
-
-   /* See if the texture format already matches the format and type,
-    * in which case the memcpy-based fast path will likely be used and
-    * we don't have to blit. */
-   if (_mesa_format_matches_format_and_type(texImage->TexFormat, format,
-                                            type, unpack->SwapBytes, NULL) && !is_ms) {
-      goto fallback;
    }
 
    /* Choose the source format. */
@@ -2743,6 +2745,14 @@ st_GetTexSubImage(struct gl_context * ctx,
    if (dst_format == PIPE_FORMAT_NONE)
       goto non_blit_transfer;
 
+   /* See if the texture format already matches the format and type,
+    * in which case the memcpy-based fast path will be used. Check this
+    * before the PBO path: that path draws with a shader, which can change
+    * NaN payloads, while the CPU path copies texels unchanged. */
+   if (_mesa_format_matches_format_and_type(texImage->TexFormat, format,
+                                            type, ctx->Pack.SwapBytes, NULL))
+      goto non_blit_transfer;
+
    if (st->pbo.download_enabled && ctx->Pack.BufferObj) {
       if (try_pbo_download(st, texImage,
                            src_format, dst_format,
@@ -2751,12 +2761,6 @@ st_GetTexSubImage(struct gl_context * ctx,
                            &ctx->Pack, pixels))
          return;
    }
-
-   /* See if the texture format already matches the format and type,
-    * in which case the memcpy-based fast path will be used. */
-   if (_mesa_format_matches_format_and_type(texImage->TexFormat, format,
-                                            type, ctx->Pack.SwapBytes, NULL))
-      goto non_blit_transfer;
 
    dst = create_dst_texture(ctx, dst_format, pipe_target, width, height, depth, gl_target, bind);
    if (!dst)
