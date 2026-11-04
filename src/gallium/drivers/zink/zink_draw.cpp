@@ -507,11 +507,15 @@ emit_dynamic_atoms(struct zink_context *ctx, uint32_t atoms, unsigned num_viewpo
             !zink_screen(ctx->base.screen)->optimal_keys &&
             zink_get_fs_key(ctx)->lower_depth_bias;
          if (shader_bias) {
-            /* D24-on-float emulation: all three terms are applied in the
-             * shader (see lower_depth_bias_fs) -- a hardware bias never
-             * reaches a depth the shader writes, and D3D clamps the sum. */
+            /* All three terms are applied in the shader (see
+             * lower_depth_bias_fs) -- a hardware bias never reaches a
+             * depth the shader writes, and D3D clamps the sum. The
+             * constant part is in units of the depth format: 2^16 for
+             * D16, 2^24 for D24. */
+            struct pipe_resource *zs = ctx->fb_state.zsbuf.texture;
+            unsigned depth_shift = zs && zs->format == PIPE_FORMAT_Z16_UNORM ? 16 : 24;
             float bias[3] = {
-               ctx->was_using_depth_bias ? rast_state->offset_units / 16777216.0f : 0.0f,
+               ctx->was_using_depth_bias ? rast_state->offset_units / (float)(1u << depth_shift) : 0.0f,
                ctx->was_using_depth_bias ? rast_state->offset_scale : 0.0f,
                ctx->was_using_depth_bias ? rast_state->offset_clamp : 0.0f,
             };

@@ -3218,6 +3218,11 @@ init_driver_workarounds(struct zink_screen *screen)
     * pipeline flag cannot turn per-sample invocations off or on */
    screen->driver_workarounds.no_pipeline_sample_shading =
       zink_driverid(screen) == VK_DRIVER_ID_MESA_KOSMICKRISP;
+   /* KosmicKrisp's hardware depth bias lands up to two units of the
+    * depth buffer away from the fixed-point rule, and the error changes
+    * with the sign of the bias and with the depth value */
+   screen->driver_workarounds.no_hw_depth_bias =
+      zink_driverid(screen) == VK_DRIVER_ID_MESA_KOSMICKRISP;
    if (zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) {
       /* performance */
       screen->info.border_color_feats.customBorderColorWithoutFormat = VK_FALSE;

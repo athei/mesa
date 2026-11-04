@@ -2225,7 +2225,10 @@ zink_update_fs_key_depth_bias(struct zink_context *ctx)
    bool lower = false;
    struct pipe_resource *zs = ctx->fb_state.zsbuf.texture;
    if (zs && ctx->rast_state && ctx->rast_state->offset_fill &&
-       ctx->rast_state->offset_units != 0.0f &&
+       (ctx->rast_state->offset_units != 0.0f ||
+        (screen->driver_workarounds.no_hw_depth_bias &&
+         ctx->rast_state->offset_scale != 0.0f &&
+         zs->format == PIPE_FORMAT_Z16_UNORM)) &&
        !fs->info.fs.early_fragment_tests &&
        (ctx->fb_state.samples <= 1 ||
         (fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) ||
@@ -2235,6 +2238,8 @@ zink_update_fs_key_depth_bias(struct zink_context *ctx)
          lower = !screen->have_D24_UNORM_S8_UINT;
       else if (zs->format == PIPE_FORMAT_Z24X8_UNORM)
          lower = !screen->have_X8_D24_UNORM_PACK32;
+      else if (zs->format == PIPE_FORMAT_Z16_UNORM)
+         lower = screen->driver_workarounds.no_hw_depth_bias;
    }
    if (zink_get_fs_key(ctx)->lower_depth_bias != lower) {
       zink_set_fs_key(ctx)->lower_depth_bias = lower;

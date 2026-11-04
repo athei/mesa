@@ -1650,6 +1650,8 @@ struct zink_screen {
       bool no_linesmooth;
       /* advertises sampleRateShading but ignores sampleShadingEnable */
       bool no_pipeline_sample_shading;
+      /* the hardware depth bias misses the fixed-point rule */
+      bool no_hw_depth_bias;
       bool can_do_invalid_linear_modifier;
       bool inconsistent_interpolation;
       bool can_2d_view_sparse;
