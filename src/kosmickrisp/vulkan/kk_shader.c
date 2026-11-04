@@ -1612,8 +1612,8 @@ kk_nir_count_fs_invocations(nir_shader *nir)
 
    /* One atomic pair per active query that counts fragments: several
     * queries with overlapping spans can be live at the same time. */
-   nir_variable *index = nir_variable_create(nir, nir_var_function_temp,
-                                             glsl_uint_type(), "fs_stats_idx");
+   nir_variable *index = nir_local_variable_create(impl, glsl_uint_type(),
+                                                   "fs_stats_idx");
    nir_store_var(&b, index, nir_imm_int(&b, 0), 1);
 
    nir_def *per_draw = nir_load_per_draw_ptr_kk(&b, 1, 64);
