@@ -2224,8 +2224,11 @@ create_image_surface(struct zink_context *ctx, const struct pipe_image_view *vie
       break;
    case PIPE_TEXTURE_2D_ARRAY:
    case PIPE_TEXTURE_1D_ARRAY:
-      if (depth < res->base.b.array_size && depth == 1)
-         target = target == PIPE_TEXTURE_2D_ARRAY ? PIPE_TEXTURE_2D : PIPE_TEXTURE_1D;
+      /* Keep the array view type for every layer count. GL requires
+       * image1DArray/image2DArray for array textures, so a shader image
+       * of an array texture is always arrayed. A 2D view bound to an
+       * arrayed shader image does not match in Vulkan, and the driver
+       * then reads the image in an undefined way. */
       break;
    default: break;
    }
