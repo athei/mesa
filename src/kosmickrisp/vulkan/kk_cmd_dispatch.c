@@ -63,13 +63,15 @@ kk_stats_dispatch(struct kk_cmd_buffer *cmd, uint64_t groups,
                   uint32_t stride_B, uint32_t count,
                   struct mtl_size local_size)
 {
-   uint64_t counter = cmd->state.stats.addr[KK_STAT_CS_INVOCATIONS];
-   if (!counter)
-      return;
-
-   libkk_dispatch_stats(cmd, kk_grid_1d(1), true, groups,
-                        stride_B / sizeof(uint32_t), count,
-                        local_size.x * local_size.y * local_size.z, counter);
+   struct kk_stats_record *rec;
+   kk_stats_foreach(&cmd->state.stats, rec) {
+      if (!rec->addr[KK_STAT_CS_INVOCATIONS])
+         continue;
+      libkk_dispatch_stats(cmd, kk_grid_1d(1), true, groups,
+                           stride_B / sizeof(uint32_t), count,
+                           local_size.x * local_size.y * local_size.z,
+                           rec->addr[KK_STAT_CS_INVOCATIONS]);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -123,8 +125,10 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
          .z = groupCountZ * local_size.z,
       };
 
-      cmd->state.stats.pending[KK_STAT_CS_INVOCATIONS] +=
-         (uint64_t)grid_size.x * grid_size.y * grid_size.z;
+      struct kk_stats_record *cs_rec;
+      uint64_t invocations = (uint64_t)grid_size.x * grid_size.y * grid_size.z;
+      kk_stats_foreach(&cmd->state.stats, cs_rec)
+         cs_rec->pending[KK_STAT_CS_INVOCATIONS] += invocations;
 
       kk_flush_compute_state(cmd);
       mtl_dispatch_threads(encoder, grid_size, local_size);

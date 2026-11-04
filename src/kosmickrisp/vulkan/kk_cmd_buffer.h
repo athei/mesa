@@ -96,6 +96,10 @@ struct kk_descriptor_state {
 #define KK_SINK_RO_OFFSET 64
 #define KK_SINK_SIZE      128
 
+#ifndef KK_STATS_ACTIVE_MAX
+#define KK_STATS_ACTIVE_MAX 32
+#endif
+
 struct kk_per_draw_data {
    uint32_t draw_id;
    uint32_t index_size;
@@ -119,7 +123,10 @@ struct kk_per_draw_data {
    uint32_t rasterization_stream;
 
    uint64_t sink;
-   uint64_t fs_invocations;
+   /* report addresses of the active statistics queries that count
+    * fragment shader invocations; the shader adds to every one */
+   uint64_t fs_invocations[KK_STATS_ACTIVE_MAX];
+   uint32_t fs_invocations_count;
    uint64_t provoking_ids;
 };
 
@@ -254,11 +261,71 @@ enum kk_stat {
    KK_STAT_COUNT,
 };
 
-struct kk_stats_state {
+/* The GL API starts one query object per counter, so several pipeline
+ * statistics queries are active at the same time, with identical or
+ * overlapping spans. Each active query owns its report addresses and
+ * its own accumulation. */
+#define KK_STATS_ACTIVE_MAX 32
+
+struct kk_stats_record {
+   VkQueryPool pool; /* VK_NULL_HANDLE marks the record free */
+   uint32_t query;
    uint64_t addr[KK_STAT_COUNT];
    uint64_t pending[KK_STAT_COUNT];
-   bool active;
 };
+
+struct kk_stats_state {
+   struct kk_stats_record records[KK_STATS_ACTIVE_MAX];
+};
+
+static inline struct kk_stats_record *
+kk_stats_record_find(struct kk_stats_state *stats, VkQueryPool pool, uint32_t query)
+{
+   for (unsigned i = 0; i < KK_STATS_ACTIVE_MAX; ++i) {
+      struct kk_stats_record *rec = &stats->records[i];
+      if (rec->pool == pool && rec->query == query && rec->pool != VK_NULL_HANDLE)
+         return rec;
+   }
+   return NULL;
+}
+
+static inline struct kk_stats_record *
+kk_stats_record_alloc(struct kk_stats_state *stats)
+{
+   for (unsigned i = 0; i < KK_STATS_ACTIVE_MAX; ++i) {
+      struct kk_stats_record *rec = &stats->records[i];
+      if (rec->pool == VK_NULL_HANDLE) {
+         *rec = (struct kk_stats_record){0};
+         return rec;
+      }
+   }
+   /* at capacity: the new query stays untracked and reads zero */
+   return NULL;
+}
+
+static inline bool
+kk_stats_any(struct kk_stats_state *stats)
+{
+   for (unsigned i = 0; i < KK_STATS_ACTIVE_MAX; ++i)
+      if (stats->records[i].pool != VK_NULL_HANDLE)
+         return true;
+   return false;
+}
+
+static inline struct kk_stats_record *
+kk_stats_next(struct kk_stats_state *stats, unsigned *i)
+{
+   while (*i < KK_STATS_ACTIVE_MAX) {
+      struct kk_stats_record *rec = &stats->records[(*i)++];
+      if (rec->pool != VK_NULL_HANDLE)
+         return rec;
+   }
+   return NULL;
+}
+
+/* for (struct kk_stats_record *rec; kk_stats_foreach(&cmd->state.stats, rec)) */
+#define kk_stats_foreach(stats, rec) \
+   for (unsigned _stats_i = 0; (rec) = kk_stats_next((stats), &_stats_i);)
 
 
 struct kk_stats_op {

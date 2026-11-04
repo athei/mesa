@@ -460,18 +460,22 @@ kk_CmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
 
    if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
       struct kk_stats_state *stats = &cmd->state.stats;
+      struct kk_stats_record *rec = kk_stats_record_find(stats, queryPool, query);
+      if (!rec)
+         rec = kk_stats_record_alloc(stats);
+      if (!rec)
+         return; /* at capacity: this query reads zero, others stay intact */
+      *rec = (struct kk_stats_record){.pool = queryPool, .query = query};
       uint64_t report = kk_query_report_addr(dev, pool, query);
       uint32_t enabled = pool->vk.pipeline_statistics;
 
-      memset(stats, 0, sizeof(*stats));
       u_foreach_bit(i, enabled) {
          if (i < KK_STAT_COUNT) {
-            stats->addr[i] =
+            rec->addr[i] =
                report + util_bitcount(enabled & BITFIELD_MASK(i)) *
                            sizeof(struct kk_query_report);
          }
       }
-      stats->active = true;
       return;
    }
 
@@ -494,15 +498,18 @@ kk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       cmd->state.gfx.xfb.queries[index] = 0;
    } else if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
       struct kk_stats_state *stats = &cmd->state.stats;
-      for (uint32_t i = 0; i < KK_STAT_COUNT; i++) {
-         if (stats->addr[i] && stats->pending[i]) {
-            kk_cmd_stats_op(cmd, &(struct kk_stats_op){
-                                    .counter[0] = stats->addr[i],
-                                    .value = stats->pending[i],
+      struct kk_stats_record *rec = kk_stats_record_find(stats, queryPool, query);
+      if (rec) {
+         for (uint32_t i = 0; i < KK_STAT_COUNT; i++) {
+            if (rec->addr[i] && rec->pending[i]) {
+               kk_cmd_stats_op(cmd, &(struct kk_stats_op){
+                                    .counter[0] = rec->addr[i],
+                                    .value = rec->pending[i],
                                  });
+            }
          }
+         rec->pool = VK_NULL_HANDLE;
       }
-      memset(stats, 0, sizeof(*stats));
    } else {
       cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
       cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;

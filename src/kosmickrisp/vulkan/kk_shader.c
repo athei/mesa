@@ -1610,12 +1610,20 @@ kk_nir_count_fs_invocations(nir_shader *nir)
 
    nir_builder b = nir_builder_at(nir_before_impl(impl));
 
+   /* One atomic pair per active query that counts fragments: several
+    * queries with overlapping spans can be live at the same time. */
+   nir_variable *index = nir_variable_create(nir, nir_var_function_temp,
+                                             glsl_uint_type(), "fs_stats_idx");
+   nir_store_var(&b, index, nir_imm_int(&b, 0), 1);
+
    nir_def *per_draw = nir_load_per_draw_ptr_kk(&b, 1, 64);
-   nir_def *counter = nir_build_load_global_constant(
-      &b, 1, 64,
+   nir_def *fs_count = nir_build_load_global_constant(
+      &b, 1, 32,
       nir_iadd_imm(&b, per_draw,
-                   offsetof(struct kk_per_draw_data, fs_invocations)),
-      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
+                   offsetof(struct kk_per_draw_data, fs_invocations_count)),
+      .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+   nir_def *base = nir_iadd_imm(&b, per_draw,
+                                offsetof(struct kk_per_draw_data, fs_invocations));
 
    nir_push_if(&b, nir_inot(&b, nir_load_helper_invocation(&b, 1)));
    {
@@ -1623,13 +1631,25 @@ kk_nir_count_fs_invocations(nir_shader *nir)
                                   .reduction_op = nir_op_iadd);
       nir_push_if(&b, nir_elect(&b, 1));
       {
-         nir_def *old = nir_global_atomic(&b, 32, counter, count,
-                                          .atomic_op = nir_atomic_op_iadd);
-         nir_push_if(&b, nir_ult(&b, nir_iadd(&b, old, count), old));
-         nir_global_atomic(&b, 32, nir_iadd_imm(&b, counter, 4),
-                           nir_imm_int(&b, 1),
-                           .atomic_op = nir_atomic_op_iadd);
-         nir_pop_if(&b, NULL);
+         nir_loop *loop = nir_push_loop(&b);
+         {
+            nir_def *i = nir_load_var(&b, index);
+            nir_break_if(&b, nir_inot(&b, nir_ult(&b, i, fs_count)));
+            nir_def *counter = nir_build_load_global_constant(
+               &b, 1, 64,
+               nir_iadd(&b, base,
+                        nir_u2u64(&b, nir_ishl(&b, i, nir_imm_int(&b, 3)))),
+               .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
+            nir_def *old = nir_global_atomic(&b, 32, counter, count,
+                                             .atomic_op = nir_atomic_op_iadd);
+            nir_push_if(&b, nir_ult(&b, nir_iadd(&b, old, count), old));
+            nir_global_atomic(&b, 32, nir_iadd_imm(&b, counter, 4),
+                              nir_imm_int(&b, 1),
+                              .atomic_op = nir_atomic_op_iadd);
+            nir_pop_if(&b, NULL);
+            nir_store_var(&b, index, nir_iadd_imm(&b, i, 1), 1);
+         }
+         nir_pop_loop(&b, loop);
       }
       nir_pop_if(&b, NULL);
    }
