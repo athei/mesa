@@ -1655,6 +1655,8 @@ kk_nir_count_fs_invocations(nir_shader *nir)
    }
    nir_pop_if(&b, NULL);
 
+   /* the loop index is a function temp; nir_to_msl has no derefs */
+   nir_lower_vars_to_ssa(nir);
    nir_progress(true, impl, nir_metadata_none);
 }
 
