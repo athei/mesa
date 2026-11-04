@@ -3212,11 +3212,10 @@ init_driver_workarounds(struct zink_screen *screen)
                                                          screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
                                                          screen->is_cpu);
    screen->driver_workarounds.broken_l4a4 = zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
-   /* KosmicKrisp advertises sampleRateShading, which wined3d's gl_SampleID
-    * emission keys the ARB_sample_shading extension off, but never reads
+   /* KosmicKrisp advertises sampleRateShading but never reads
     * pMultisampleState->sampleShadingEnable: Metal invokes a fragment
-    * shader per sample only when it references sample builtins, so
-    * pipeline-forced per-sample invocations do nothing there */
+    * shader per sample whenever the render target is multisampled, so the
+    * pipeline flag cannot turn per-sample invocations off or on */
    screen->driver_workarounds.no_pipeline_sample_shading =
       zink_driverid(screen) == VK_DRIVER_ID_MESA_KOSMICKRISP;
    if (zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) {
