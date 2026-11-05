@@ -2433,7 +2433,16 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
                     state);
 
    bool clip = !kk_stats_real_gs(cmd);
-   struct kk_stats_record *rec;
+   struct kk_stats_record *rec, *tess_last = NULL;
+
+   /* The tessellation counter is cleared when it is read, and every record
+    * adds the same count, so only the last record may consume it. */
+   kk_stats_foreach(&cmd->state.stats, rec) {
+      uint64_t c_invocations = clip ? rec->addr[KK_STAT_C_INVOCATIONS] : 0u;
+      uint64_t c_primitives = clip ? rec->addr[KK_STAT_C_PRIMITIVES] : 0u;
+      if (gfx->tess.statistic || c_invocations || c_primitives)
+         tess_last = rec;
+   }
    kk_stats_foreach(&cmd->state.stats, rec) {
       uint64_t c_invocations = clip ? rec->addr[KK_STAT_C_INVOCATIONS] : 0u;
       uint64_t c_primitives = clip ? rec->addr[KK_STAT_C_PRIMITIVES] : 0u;
@@ -2442,7 +2451,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
          libkk_tess_stats(cmd, kk_grid_1d(1), true, gfx->tess.out_draws_addr,
                           gfx->tess.statistic, verts_per_prim,
                           rec->addr[KK_STAT_TES_INVOCATIONS], c_invocations,
-                          c_primitives);
+                          c_primitives, rec == tess_last);
       }
    }
 
@@ -2595,7 +2604,17 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
    if (!kk_gs_is_passthrough(cmd)) {
       const struct vk_dynamic_graphics_state *dyn =
          &cmd->vk.dynamic_graphics_state;
-      struct kk_stats_record *gs_rec;
+      struct kk_stats_record *gs_rec, *gs_last = NULL;
+
+      /* The count words are cleared when they are read, and every record
+       * adds the same count, so only the last record may consume them. */
+      kk_stats_foreach(&cmd->state.stats, gs_rec) {
+         if (gs_rec->addr[KK_STAT_GS_INVOCATIONS] ||
+               gs_rec->addr[KK_STAT_GS_PRIMITIVES] ||
+               gs_rec->addr[KK_STAT_C_INVOCATIONS] ||
+               gs_rec->addr[KK_STAT_C_PRIMITIVES])
+            gs_last = gs_rec;
+      }
       kk_stats_foreach(&cmd->state.stats, gs_rec) {
          if (!(gs_rec->addr[KK_STAT_GS_INVOCATIONS] ||
                gs_rec->addr[KK_STAT_GS_PRIMITIVES] ||
@@ -2611,7 +2630,7 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
                         gs->count_index[3], gs_rec->addr[KK_STAT_GS_INVOCATIONS],
                         gs_rec->addr[KK_STAT_GS_PRIMITIVES],
                         gs_rec->addr[KK_STAT_C_INVOCATIONS],
-                        gs_rec->addr[KK_STAT_C_PRIMITIVES]);
+                        gs_rec->addr[KK_STAT_C_PRIMITIVES], gs_rec == gs_last);
       }
    }
 

@@ -222,11 +222,15 @@ libkk_stats_restart_draws(constant uint32_t *draws, uint32_t stride_el,
 KERNEL(1)
 libkk_tess_stats(constant uint32_t *out_draw, global uint32_t *tes_count,
                  uint32_t verts_per_prim, global uint64_t *tes_invocations,
-                 global uint64_t *c_invocations, global uint64_t *c_primitives)
+                 global uint64_t *c_invocations, global uint64_t *c_primitives,
+                 uint32_t clear)
 {
    if (tes_count) {
       libkk_stats_add(tes_invocations, *tes_count);
-      *tes_count = 0;
+      /* The count is shared by every active query, so only the last reader
+       * may clear it. */
+      if (clear)
+         *tes_count = 0;
    }
 
    uint64_t primitives = (uint64_t)(out_draw[0] / verts_per_prim) * out_draw[1];
@@ -236,7 +240,8 @@ libkk_tess_stats(constant uint32_t *out_draw, global uint32_t *tes_count,
 
 static uint
 libkk_gs_stream_prims(global struct poly_geometry_params *p, int static_count,
-                      int count_index, uint count_words, uint prefix_sum)
+                      int count_index, uint count_words, uint prefix_sum,
+                      uint clear)
 {
    uint in_prims = p->input_primitives;
    if (static_count >= 0)
@@ -249,7 +254,9 @@ libkk_gs_stream_prims(global struct poly_geometry_params *p, int static_count,
       index += (in_prims - 1) * count_words;
 
    uint prims = p->count_buffer[index];
-   if (!prefix_sum)
+   /* The count words are shared by every active query, so only the last
+    * reader may clear them. */
+   if (!prefix_sum && clear)
       p->count_buffer[index] = 0;
    return prims;
 }
@@ -263,7 +270,8 @@ libkk_gs_stats(global struct poly_geometry_params *p, uint32_t invocations,
                int32_t count_index2, int32_t count_index3,
                global uint64_t *gs_invocations,
                global uint64_t *gs_primitives,
-               global uint64_t *c_invocations, global uint64_t *c_primitives)
+               global uint64_t *c_invocations, global uint64_t *c_primitives,
+               uint clear)
 {
    int static_count[4] = {static_count0, static_count1, static_count2,
                           static_count3};
@@ -273,7 +281,7 @@ libkk_gs_stats(global struct poly_geometry_params *p, uint32_t invocations,
    uint64_t emitted = 0, rasterized = 0;
    for (uint i = 0; i < 4; i++) {
       uint prims = libkk_gs_stream_prims(p, static_count[i], count_index[i],
-                                         count_words, prefix_sum);
+                                         count_words, prefix_sum, clear);
       emitted += prims;
       if (i == raster_stream)
          rasterized = prims;
