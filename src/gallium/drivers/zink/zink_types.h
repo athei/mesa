@@ -2047,6 +2047,7 @@ struct zink_context {
    bool disable_color_writes;
    bool was_line_loop;
    bool was_using_depth_bias;
+   unsigned int depth_bias_shift;
    bool fs_query_active;
    bool occlusion_query_active;
    bool primitives_generated_active;

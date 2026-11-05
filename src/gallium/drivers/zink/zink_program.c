@@ -2246,6 +2246,15 @@ zink_update_fs_key_depth_bias(struct zink_context *ctx)
       zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
    }
 
+   /* The shader bias constants are in units of the depth format: 2^16 for
+    * D16, 2^24 for D24. A format change has to refresh them even when the
+    * lowering decision itself does not change. */
+   unsigned int depth_shift = zs && zs->format == PIPE_FORMAT_Z16_UNORM ? 16 : 24;
+   if (ctx->depth_bias_shift != depth_shift) {
+      ctx->depth_bias_shift = depth_shift;
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
+   }
+
    /* When the lowering appends the depth store, one invocation's value would
     * replace every covered sample's depth, so multisampled framebuffers need
     * per-sample invocations; that is pipeline state, tracked separately from
