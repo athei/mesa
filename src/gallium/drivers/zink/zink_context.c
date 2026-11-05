@@ -2224,11 +2224,14 @@ create_image_surface(struct zink_context *ctx, const struct pipe_image_view *vie
       break;
    case PIPE_TEXTURE_2D_ARRAY:
    case PIPE_TEXTURE_1D_ARRAY:
-      /* Keep the array view type for every layer count. GL requires
-       * image1DArray/image2DArray for array textures, so a shader image
-       * of an array texture is always arrayed. A 2D view bound to an
-       * arrayed shader image does not match in Vulkan, and the driver
-       * then reads the image in an undefined way. */
+      /* A layered bind shows every requested layer to an arrayed shader
+       * image (image1DArray/image2DArray), so the view must stay arrayed:
+       * a 2D view of an arrayed shader image does not match in Vulkan, and
+       * the driver then reads the image in an undefined way. A non-layered
+       * bind shows one layer of the texture as a plain 1D/2D image
+       * (single_layer_view), and the view must match that shape. */
+      if (view->u.tex.single_layer_view)
+         target = target == PIPE_TEXTURE_2D_ARRAY ? PIPE_TEXTURE_2D : PIPE_TEXTURE_1D;
       break;
    default: break;
    }
