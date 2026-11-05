@@ -6,11 +6,36 @@
 
 #include "mtl_encoder.h"
 
+#include <stdatomic.h>
+
 #include <Metal/MTL4CommandBuffer.h>
 #include <Metal/MTL4ComputeCommandEncoder.h>
 #include <Metal/MTL4Counters.h>
 #include <Metal/MTL4RenderCommandEncoder.h>
 #include <Metal/MTLRenderPass.h>
+
+/* Device visibility does not make the aliases of memory that sparse
+ * resources bind more than once consistent, so once the process has created
+ * such a resource every barrier uses ResourceAlias. The flag is never
+ * cleared. A barrier takes its visibility when it is encoded, so a command
+ * buffer recorded before the first such resource was created keeps Device
+ * barriers when it is submitted later. */
+static atomic_bool resource_alias_visibility;
+
+void
+mtl_barriers_use_resource_alias(void)
+{
+   atomic_store_explicit(&resource_alias_visibility, true,
+                         memory_order_relaxed);
+}
+
+static MTL4VisibilityOptions
+barrier_visibility(enum mtl_visibility_options visibility)
+{
+   if (atomic_load_explicit(&resource_alias_visibility, memory_order_relaxed))
+      return MTL4VisibilityOptionResourceAlias;
+   return (MTL4VisibilityOptions)visibility;
+}
 
 /* Common encoder utils */
 void
@@ -24,14 +49,13 @@ mtl_end_encoding(void *encoder)
 
 void
 mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
-                         enum mtl_stages before_queue_stages)
+                         enum mtl_stages before_queue_stages,
+                         enum mtl_visibility_options visibility)
 {
    @autoreleasepool {
       id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
-      /* TODO_KOSMICKRISP Expose visibility option since resource alias should only be required
-       * if occlusion queries are used */
       [enc barrierAfterStages:(MTLStages)after_stages beforeQueueStages:(MTLStages)before_queue_stages
-           visibilityOptions:MTL4VisibilityOptionResourceAlias];
+           visibilityOptions:barrier_visibility(visibility)];
    }
 }
 
@@ -42,20 +66,21 @@ mtl_barrier_after_encoder_stages(void *encoder, enum mtl_stages after_stages,
    @autoreleasepool {
       id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
       [enc barrierAfterEncoderStages:(MTLStages)after_stages beforeEncoderStages:(MTLStages)before_queue_stages
-           visibilityOptions:MTL4VisibilityOptionResourceAlias];
+           visibilityOptions:barrier_visibility(MTL_VISIBILITY_OPTION_DEVICE)];
    }
 }
 
 void
 mtl_barrier_after_queue_stages(void *encoder,
                                enum mtl_stages after_queue_stages,
-                               enum mtl_stages before_stages)
+                               enum mtl_stages before_stages,
+                               enum mtl_visibility_options visibility)
 {
    @autoreleasepool {
       id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
       [enc barrierAfterQueueStages:(MTLStages)after_queue_stages
                       beforeStages:(MTLStages)before_stages
-                 visibilityOptions:MTL4VisibilityOptionResourceAlias];
+                 visibilityOptions:barrier_visibility(visibility)];
    }
 }
 

@@ -6,6 +6,11 @@
 
 #include "mtl_encoder.h"
 
+void
+mtl_barriers_use_resource_alias(void)
+{
+}
+
 /* Common encoder utils */
 void
 mtl_end_encoding(void *encoder)
@@ -14,7 +19,8 @@ mtl_end_encoding(void *encoder)
 
 void
 mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
-                         enum mtl_stages before_queue_stages)
+                         enum mtl_stages before_queue_stages,
+                         enum mtl_visibility_options visibility)
 {
 }
 
@@ -27,7 +33,8 @@ mtl_barrier_after_encoder_stages(void *encoder, enum mtl_stages after_stages,
 void
 mtl_barrier_after_queue_stages(void *encoder,
                                enum mtl_stages after_queue_stages,
-                               enum mtl_stages before_stages)
+                               enum mtl_stages before_stages,
+                               enum mtl_visibility_options visibility)
 {
 }
 

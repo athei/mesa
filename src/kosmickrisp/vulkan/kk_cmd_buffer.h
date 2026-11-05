@@ -164,6 +164,8 @@ struct kk_graphics_state {
        * There can only be one active at a time (hardware constraint).
        */
       uint16_t index;
+
+      bool visibility_used;
    } occlusion;
 
    /* Index buffer */

@@ -1515,6 +1515,8 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
    if (gfx->dirty & KK_DIRTY_OCCLUSION) {
       mtl_set_visibility_result_mode(enc, gfx->occlusion.mode,
                                      gfx->occlusion.index * sizeof(uint64_t));
+      if (gfx->occlusion.mode != MTL_VISIBILITY_RESULT_MODE_DISABLED)
+         gfx->occlusion.visibility_used = true;
    }
 }
 

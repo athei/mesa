@@ -336,7 +336,10 @@ static void
 end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
 {
    /* TODO_KOSMICKRISP This is probably overkill */
-   mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
+   mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL,
+                            cmd->state.gfx.occlusion.visibility_used
+                               ? MTL_VISIBILITY_OPTION_RESOURCE_ALIAS
+                               : MTL_VISIBILITY_OPTION_DEVICE);
    mtl_end_encoding(encoder);
    mtl_release(encoder);
 
@@ -384,6 +387,8 @@ cs_end(struct kk_cmd_buffer *cmd)
       end_encoder(cmd, cmd->metal.compute);
       cmd->metal.compute = NULL;
    }
+
+   cmd->state.gfx.occlusion.visibility_used = false;
 }
 
 void

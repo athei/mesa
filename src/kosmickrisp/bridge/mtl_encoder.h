@@ -11,17 +11,22 @@
 
 #include <stdint.h>
 
+/* From now on, every barrier uses ResourceAlias visibility */
+void mtl_barriers_use_resource_alias(void);
+
 /* Common encoder utils */
 void mtl_end_encoding(void *encoder);
 void mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
-                              enum mtl_stages before_queue_stages);
+                              enum mtl_stages before_queue_stages,
+                              enum mtl_visibility_options visibility);
 void mtl_barrier_after_encoder_stages(void *encoder,
                                       enum mtl_stages after_stages,
                                       enum mtl_stages before_queue_stages);
 
 void mtl_barrier_after_queue_stages(void *encoder,
                                     enum mtl_stages after_queue_stages,
-                                    enum mtl_stages before_stages);
+                                    enum mtl_stages before_stages,
+                                    enum mtl_visibility_options visibility);
 
 void mtl_update_fence(void *encoder, mtl_fence *fence,
                       enum mtl_stages after_stages);

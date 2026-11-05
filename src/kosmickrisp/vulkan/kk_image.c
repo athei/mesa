@@ -669,6 +669,9 @@ kk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
       return result;
    }
 
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_ALIASED_BIT)
+      mtl_barriers_use_resource_alias();
+
    *pImage = kk_image_to_handle(image);
 
    return VK_SUCCESS;

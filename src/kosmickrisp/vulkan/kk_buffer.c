@@ -41,6 +41,9 @@ kk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    if (pCreateInfo->size > pdev->info.max_buffer_size)
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
+   if (pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_ALIASED_BIT)
+      mtl_barriers_use_resource_alias();
+
    buffer =
       vk_buffer_create(&dev->vk, pCreateInfo, pAllocator, sizeof(*buffer));
    if (!buffer)
