@@ -354,9 +354,20 @@ end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
    mtl_release(encoder);
 
    /* Fold the pending timestamp counter-heap resolves into `cmd_buf` */
-   util_dynarray_foreach(&cmd->ts_resolves, struct kk_ts_resolve, r) {
-      mtl_command_resolve_counter_heap(cmd->metal.cmd_buf, r->heap, r->index,
-                                       1u, r->dst_addr);
+   struct kk_ts_resolve *resolves = util_dynarray_begin(&cmd->ts_resolves);
+   unsigned count =
+      util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve);
+   for (unsigned i = 0; i < count;) {
+      unsigned n = 1u;
+      while (i + n < count && resolves[i + n].heap == resolves[i].heap &&
+             resolves[i + n].index == resolves[i].index + n &&
+             resolves[i + n].dst_addr ==
+                resolves[i].dst_addr + n * sizeof(uint64_t))
+         n++;
+      mtl_command_resolve_counter_heap(cmd->metal.cmd_buf, resolves[i].heap,
+                                       resolves[i].index, n,
+                                       resolves[i].dst_addr);
+      i += n;
    }
 
    util_dynarray_clear(&cmd->ts_resolves);
