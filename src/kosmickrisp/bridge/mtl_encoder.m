@@ -504,7 +504,17 @@ mtl_compute_write_timestamp(mtl_compute_encoder *encoder,
       id<MTL4ComputeCommandEncoder> enc =
          (id<MTL4ComputeCommandEncoder>)encoder;
       id<MTL4CounterHeap> h = (id<MTL4CounterHeap>)heap;
-      [enc writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed
+      /* Metal's headers call the granularity a hint and document neither a
+       * limit on timestamp writes nor a need for a dispatch. Measured on an
+       * Apple M5 Max with macOS 27.2.1: at relaxed granularity, of the writes
+       * encoded after the first dispatch of a compute encoder the first 4 are
+       * performed, with one value, and a later one leaves its entry as it
+       * was. At precise granularity a write directly after a dispatch is
+       * performed and samples when that dispatch has finished; a write with
+       * no dispatch since the previous write, or in an encoder without a
+       * dispatch, is not performed. So the caller encodes a dispatch before
+       * each write. */
+      [enc writeTimestampWithGranularity:MTL4TimestampGranularityPrecise
                                 intoHeap:h
                                  atIndex:index];
    }
