@@ -520,7 +520,17 @@ emit_dynamic_atoms(struct zink_context *ctx, uint32_t atoms, unsigned num_viewpo
          break;
       }
       case ZINK_ATOM_DEPTH_BIAS:
-         if (ctx->was_using_depth_bias)
+         if (zink_get_fs_base_key(ctx)->lower_depth_bias) {
+            /* the constant term in units of a 24-bit buffer */
+            const float bias[3] = {
+               rast_state->offset_units / (float)(1 << 24),
+               rast_state->offset_scale,
+               rast_state->offset_clamp,
+            };
+            VKCTX(CmdSetDepthBias)(bs->cmdbuf, 0.0f, 0.0f, 0.0f);
+            VKCTX(CmdPushConstants)(bs->cmdbuf, ctx->curr_program->base.layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+                                    offsetof(struct zink_gfx_push_constant, depth_bias), sizeof(bias), bias);
+         } else if (ctx->was_using_depth_bias)
             VKCTX(CmdSetDepthBias)(bs->cmdbuf, rast_state->offset_units, rast_state->offset_clamp, rast_state->offset_scale);
          else
             VKCTX(CmdSetDepthBias)(bs->cmdbuf, 0.0f, 0.0f, 0.0f);
@@ -1034,6 +1044,9 @@ zink_draw_atoms(struct zink_context *ctx,
                ctx->was_using_depth_bias = using_depth_bias;
                zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
             }
+            ctx->was_using_triangle_depth_bias = using_depth_bias && rast_prim == MESA_PRIM_TRIANGLES;
+            /* before ZINK_ATOM_PIPELINE, which compiles the fragment shader for it */
+            zink_update_fs_key_depth_bias(ctx);
             break;
          }
          case ZINK_ATOM_PIPELINE:
@@ -1400,6 +1413,10 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
 
    if (BATCH_CHANGED)
       zink_update_descriptor_refs(ctx, false);
+
+   /* mesh draws keep the hardware depth bias; the next zink_draw decides it again */
+   if (zink_set_fs_key_depth_bias(ctx, false))
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_PRIMITIVE);
 
    bool pipeline_changed = false;
    if (need_rp_update || ctx->mesh_dirty || ctx->dirty_mesh_stages || BATCH_CHANGED) {

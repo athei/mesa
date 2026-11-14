@@ -107,6 +107,7 @@ fields[member_idx].offset = offsetof(struct zink_gfx_push_constant, field);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN, line_stipple_pattern);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_VIEWPORT_SCALE, viewport_scale);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_LINE_WIDTH, line_width);
+   PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_DEPTH_BIAS, depth_bias);
 
    pushconst = nir_variable_create(nir, nir_var_mem_push_const,
                                    glsl_struct_type(fields, ZINK_GFX_PUSHCONST_MAX, "struct", false),
@@ -1092,6 +1093,98 @@ lower_dual_blend(nir_shader *shader)
    }
    nir_shader_preserve_all_metadata(shader);
    return progress;
+}
+
+struct lower_depth_bias_state {
+   nir_def *own; //the frag coord load the bias is computed from
+   nir_def *biased; //the frag coord with the biased z
+   nir_variable *var; //the frag coord input, or NULL
+   unsigned var_frac; //its first component before it was widened to vec4
+};
+
+static bool
+lower_depth_bias_read(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct lower_depth_bias_state *state = data;
+   if (&intr->def == state->own)
+      return false;
+   if (intr->intrinsic == nir_intrinsic_load_frag_coord) {
+      nir_def_rewrite_uses(&intr->def, state->biased);
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+   if (intr->intrinsic != nir_intrinsic_load_deref || !state->var)
+      return false;
+   nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+   if (nir_deref_instr_get_variable(deref) != state->var)
+      return false;
+   assert(deref->deref_type == nir_deref_type_var);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = nir_channels(b, state->biased,
+                                 BITFIELD_MASK(intr->def.num_components) << state->var_frac);
+   nir_def_rewrite_uses(&intr->def, value);
+   nir_instr_remove(&intr->instr);
+   /* its type is the one the input had before it was widened */
+   nir_deref_instr_remove_if_unused(deref);
+   return true;
+}
+
+/* A D24 format the device lacks is replaced with D32_SFLOAT(_S8_UINT)
+ * (zink_get_format), and the device applies the constant depth bias with the
+ * float rule: its unit depends on the exponent of the primitive's largest
+ * depth, so no constant factor gives GL's fixed-point step at every depth.
+ * The whole bias is computed here with the step of a 24-bit buffer and
+ * written as the depth, while the hardware bias is 0 (ZINK_ATOM_DEPTH_BIAS).
+ * gl_FragCoord.z reads see the biased depth, as they would with the
+ * hardware bias.
+ */
+static bool
+lower_depth_bias_fs(nir_shader *shader)
+{
+   assert(!shader->info.fs.early_fragment_tests);
+   assert(!(shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)));
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+   /* a second FragCoord variable is invalid SPIR-V, so z is read from the
+    * shader's own input when it has one; it may cover only the components
+    * the shader read
+    */
+   struct lower_depth_bias_state state = {0};
+   state.var = nir_find_variable_with_location(shader, nir_var_shader_in, VARYING_SLOT_POS);
+   nir_def *fc;
+   if (state.var) {
+      state.var_frac = state.var->data.location_frac;
+      state.var->type = glsl_vec4_type();
+      state.var->data.location_frac = 0;
+      fc = nir_load_var(&b, state.var);
+   } else {
+      fc = nir_load_frag_coord(&b);
+      BITSET_SET(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD);
+   }
+   state.own = fc;
+
+   nir_def *terms = nir_load_push_constant_zink(&b, 3, 32, nir_imm_int(&b, ZINK_GFX_PUSHCONST_DEPTH_BIAS));
+   nir_def *z = nir_channel(&b, fc, 2);
+   nir_def *slope = nir_fmax(&b, nir_fabs(&b, nir_ddx(&b, z)), nir_fabs(&b, nir_ddy(&b, z)));
+   nir_def *bias = nir_ffma(&b, nir_channel(&b, terms, 1), slope, nir_channel(&b, terms, 0));
+   /* a positive clamp is an upper bound, a negative one a lower bound */
+   nir_def *clamp = nir_channel(&b, terms, 2);
+   bias = nir_bcsel(&b, nir_fgt_imm(&b, clamp, 0.0), nir_fmin(&b, bias, clamp),
+                    nir_bcsel(&b, nir_flt(&b, clamp, nir_imm_float(&b, 0.0f)), nir_fmax(&b, bias, clamp), bias));
+   /* a fixed-point buffer saturates */
+   nir_def *biased_z = nir_fsat(&b, nir_fadd(&b, z, bias));
+   state.biased = nir_vector_insert_imm(&b, fc, biased_z, 2);
+
+   nir_shader_intrinsics_pass(shader, lower_depth_bias_read, nir_metadata_control_flow, &state);
+
+   nir_variable *out = nir_create_variable_with_location(shader, nir_var_shader_out, FRAG_RESULT_DEPTH,
+                                                         glsl_float_type());
+   /* the cursor is still after the bias */
+   nir_store_var(&b, out, biased_z, 1);
+   shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   shader->info.fs.depth_layout = FRAG_DEPTH_LAYOUT_ANY;
+   return nir_progress(true, impl, nir_metadata_none);
 }
 
 static bool
@@ -4382,6 +4475,10 @@ zink_shader_compile(struct zink_screen *screen, bool can_shobj, struct zink_shad
          if (nir->info.fs.uses_fbfetch_output) {
             nir_variable *fbfetch = NULL;
             NIR_PASS(_, nir, lower_fbfetch, &fbfetch, zink_fs_key_base(key)->fbfetch_ms);
+            need_optimize = true;
+         }
+         if (zink_fs_key_base(key)->lower_depth_bias) {
+            NIR_PASS(_, nir, lower_depth_bias_fs);
             need_optimize = true;
          }
          nir_foreach_shader_in_variable_safe(var, nir) {

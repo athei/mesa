@@ -1050,6 +1050,7 @@ struct zink_gfx_push_constant {
    uint32_t line_stipple_pattern;
    float viewport_scale[2];
    float line_width;
+   float depth_bias[3]; //constant, slope factor, clamp
 };
 
 /* The order of the enums MUST match the order of the zink_gfx_push_constant
@@ -1064,6 +1065,7 @@ enum zink_gfx_push_constant_member {
    ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN,
    ZINK_GFX_PUSHCONST_VIEWPORT_SCALE,
    ZINK_GFX_PUSHCONST_LINE_WIDTH,
+   ZINK_GFX_PUSHCONST_DEPTH_BIAS,
    ZINK_GFX_PUSHCONST_MAX
 };
 
@@ -2168,6 +2170,7 @@ struct zink_context {
    bool disable_color_writes;
    bool was_line_loop;
    bool was_using_depth_bias;
+   bool was_using_triangle_depth_bias; //was_using_depth_bias for filled triangles
    bool fs_query_active;
    bool occlusion_query_active;
    bool primitives_generated_active;

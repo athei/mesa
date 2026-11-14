@@ -2328,6 +2328,53 @@ zink_update_fs_key_color_mode(struct zink_context *ctx)
       zink_update_dirty_gfx_stages(ctx, BITFIELD_BIT(MESA_SHADER_FRAGMENT));
 }
 
+/* whether the draw's depth bias is applied in the fragment shader (lower_depth_bias_fs)
+ *
+ * Only a constant bias is wrong in hardware: the slope term does not depend on the format.
+ * The hardware bias stays where the shader cannot apply it: a shader that writes depth or
+ * tests depth before it runs, and a multisampled framebuffer, where one shader depth
+ * would replace the depth of every sample. So do lines and points, which some drivers
+ * offset too (offset_all_prims), and polygons drawn as lines or points, whose fragments
+ * do not have the polygon's depth slope in their derivatives.
+ */
+static bool
+zink_fs_lowers_depth_bias(const struct zink_context *ctx)
+{
+   const struct zink_screen *screen = zink_screen(ctx->base.screen);
+   const struct zink_shader *fs = ctx->gfx_stages[MESA_SHADER_FRAGMENT];
+   if (!ctx->was_using_triangle_depth_bias || !ctx->rast_state || ctx->rast_state->offset_units == 0.0f ||
+       !fs || fs->info.fs.early_fragment_tests || (fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) ||
+       ctx->fb_state.samples > 1)
+      return false;
+   switch (ctx->fb_state.zsbuf.format) {
+   case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+      return !screen->have_D24_UNORM_S8_UINT;
+   case PIPE_FORMAT_Z24X8_UNORM:
+      return !screen->have_X8_D24_UNORM_PACK32;
+   default:
+      return false;
+   }
+}
+
+bool
+zink_set_fs_key_depth_bias(struct zink_context *ctx, bool lower)
+{
+   if (lower == zink_get_fs_base_key(ctx)->lower_depth_bias)
+      return false;
+   zink_set_fs_base_key(ctx)->lower_depth_bias = lower;
+   /* a program with a generated geometry shader takes the full keys (zink_gfx_program_update) */
+   if (zink_screen(ctx->base.screen)->optimal_keys)
+      ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.base.lower_depth_bias = lower;
+   zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
+   return true;
+}
+
+void
+zink_update_fs_key_depth_bias(struct zink_context *ctx)
+{
+   zink_set_fs_key_depth_bias(ctx, zink_fs_lowers_depth_bias(ctx));
+}
+
 /* mesh programs don't compile draw variants in the background, so NONE falls back to the mode it shadows */
 static uint32_t
 zink_mesh_optimal_key(struct zink_context *ctx)
@@ -2376,6 +2423,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
       }
       zink_update_fs_key_samples(ctx);
       zink_update_fs_key_color_mode(ctx);
+      zink_update_fs_key_depth_bias(ctx);
       if (zink_screen(pctx->screen)->info.have_EXT_rasterization_order_attachment_access) {
          if (ctx->gfx_pipeline_state.rast_attachment_order != info->fs.uses_fbfetch_output)
             zink_gfx_mesh_pipeline_state_dirty(ctx);

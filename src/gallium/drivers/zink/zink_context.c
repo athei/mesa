@@ -4685,6 +4685,7 @@ zink_set_framebuffer_state(struct pipe_context *pctx,
          zink_gfx_mesh_pipeline_state_dirty(ctx);
    }
    ctx->gfx_pipeline_state.rast_samples = rast_samples;
+   zink_update_fs_key_depth_bias(ctx);
 
    /* this is an ideal time to oom or rp limit flush since it won't split a renderpass */
    if (batch_needs_flush(ctx) && !ctx->unordered_blitting)
@@ -6393,6 +6394,11 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
             ctx->gfx_pipeline_state.shader_keys.key[pstage].key.vs_base.robust_access = true;
          ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.robust_access = true;
       }
+   } else {
+      /* a program with a generated geometry shader takes the full keys, and its fragment
+       * shader variant has to match lower_depth_bias (zink_set_fs_key_depth_bias)
+       */
+      ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].size = sizeof(struct zink_fs_key);
    }
    for (unsigned i = 0; i < ARRAY_SIZE(ctx->rendering_state_cache); i++)
       _mesa_set_init(&ctx->rendering_state_cache[i], ctx, hash_rendering_state, equals_rendering_state);

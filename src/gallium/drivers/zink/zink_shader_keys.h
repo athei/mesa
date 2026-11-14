@@ -97,7 +97,7 @@ struct zink_fs_key_base {
    bool fbfetch_ms : 1;
    bool shadow_needs_shader_swizzle : 1; //append zink_zs_swizzle_key after the key data
    uint8_t color_mode : 2; //enum zink_fs_color_mode
-   uint8_t pad : 1;
+   bool lower_depth_bias : 1; //the depth bias of emulated D24 is applied in the shader
    uint8_t coord_replace_bits;
 };
 
