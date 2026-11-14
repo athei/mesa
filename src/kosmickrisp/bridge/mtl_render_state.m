@@ -277,6 +277,10 @@ mtl_render_pass_descriptor_set_visibility_buffer(mtl_render_pass_descriptor *des
       MTL4RenderPassDescriptor *desc = (MTL4RenderPassDescriptor *)descriptor;
       id<MTLBuffer> buffer = (id<MTLBuffer>)visibility_buffer;
       desc.visibilityResultBuffer = buffer;
+      /* A Vulkan render pass can span several render encoders, and an
+       * occlusion query has to count the samples of all of them. Resetting a
+       * query's slot is vkCmdResetQueryPool's job, so no encoder resets it. */
+      desc.visibilityResultType = MTLVisibilityResultTypeAccumulate;
    }
 }
 
