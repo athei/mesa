@@ -1058,6 +1058,125 @@ kk_fs_needs_forced_depth_write(const nir_shader *nir,
                                           indices_known);
 }
 
+/* A vector load of a storage or uniform buffer that
+ * nir_lower_explicit_io splits into one bounded load per component. */
+static bool
+kk_is_split_buffer_load(nir_intrinsic_instr *intr, nir_variable_mode modes)
+{
+   if (intr->intrinsic != nir_intrinsic_load_deref ||
+       intr->def.num_components < 2 || intr->def.bit_size == 1 ||
+       nir_def_is_unused(&intr->def))
+      return false;
+
+   nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+   if (util_bitcount(deref->modes) != 1 || !(deref->modes & modes) ||
+       !glsl_type_is_vector(deref->type))
+      return false;
+
+   /* A row-major matrix column has a stride larger than its components. */
+   unsigned stride = glsl_get_explicit_stride(deref->type);
+   return stride == 0 || stride == intr->def.bit_size / 8;
+}
+
+/* The bounded vector load of the components in <value>, a vector of one
+ * bounded load per component, or NULL when <value> is not one. */
+static nir_def *
+kk_join_bounded_load(nir_builder *b, nir_def *value)
+{
+   if (!nir_def_is_alu(value))
+      return NULL;
+
+   nir_alu_instr *vec = nir_def_as_alu(value);
+   if (!nir_op_is_vec(vec->op) ||
+       nir_op_infos[vec->op].num_inputs != value->num_components)
+      return NULL;
+
+   nir_intrinsic_instr *first = NULL;
+   for (unsigned i = 0; i < value->num_components; i++) {
+      nir_def *comp = vec->src[i].src.ssa;
+      if (vec->src[i].swizzle[0] != 0 || comp->num_components != 1 ||
+          !nir_def_is_intrinsic(comp))
+         return NULL;
+
+      nir_intrinsic_instr *load = nir_def_as_intrinsic(comp);
+      if (load->intrinsic != nir_intrinsic_load_global_bounded &&
+          load->intrinsic != nir_intrinsic_load_global_constant_bounded)
+         return NULL;
+      if (first && load->intrinsic != first->intrinsic)
+         return NULL;
+      if (!first)
+         first = load;
+   }
+
+   /* The first component's load has the address, offset and bound of the
+    * whole vector. */
+   nir_intrinsic_instr *load =
+      nir_intrinsic_instr_create(b->shader, first->intrinsic);
+   for (unsigned i = 0; i < 3; i++)
+      load->src[i] = nir_src_for_ssa(first->src[i].ssa);
+   load->num_components = value->num_components;
+   nir_intrinsic_copy_const_indices(load, first);
+   nir_def_init(&load->instr, &load->def, value->num_components,
+                value->bit_size);
+   nir_builder_instr_insert(b, &load->instr);
+   return &load->def;
+}
+
+/* nir_lower_explicit_io checks a bounded address one component at a time,
+ * so a vec4 load becomes four loads behind four checks. Vulkan allows a
+ * check of the whole access, so each vector load of the shader is joined
+ * again into one bounded load. Only the components of one load are joined:
+ * separate loads stay separate accesses with checks of their own. */
+static bool
+kk_lower_buffer_io(nir_shader *nir, nir_address_format ssbo_format,
+                   nir_address_format ubo_format)
+{
+   nir_variable_mode bounded = 0;
+   if (ssbo_format == nir_address_format_64bit_bounded_global)
+      bounded |= nir_var_mem_ssbo;
+   if (ubo_format == nir_address_format_64bit_bounded_global)
+      bounded |= nir_var_mem_ubo;
+
+   /* Each such load gets a mov of its value, which nir_lower_explicit_io
+    * leaves pointing at the components it builds. */
+   struct util_dynarray marks = UTIL_DYNARRAY_INIT;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (!kk_is_split_buffer_load(intr, bounded))
+               continue;
+
+            nir_builder b = nir_builder_at(nir_after_instr(instr));
+            nir_def *mark = nir_mov(&b, &intr->def);
+            nir_def_rewrite_uses_after(&intr->def, mark);
+            util_dynarray_append(&marks, nir_def_as_alu(mark));
+         }
+      }
+   }
+
+   /* Not through NIR_PASS, which may replace the instructions the marks
+    * point at with copies. */
+   bool progress = nir_lower_explicit_io(nir, nir_var_mem_ssbo, ssbo_format);
+   progress |= nir_lower_explicit_io(nir, nir_var_mem_ubo, ubo_format);
+
+   util_dynarray_foreach(&marks, nir_alu_instr *, mark) {
+      nir_builder b = nir_builder_at(nir_before_instr(&(*mark)->instr));
+      nir_def *value = (*mark)->src[0].src.ssa;
+      nir_def *joined = kk_join_bounded_load(&b, value);
+      nir_def_replace(&(*mark)->def, joined ? joined : value);
+      progress = true;
+   }
+   util_dynarray_fini(&marks);
+
+   nir_foreach_function_impl(impl, nir)
+      nir_progress(progress, impl, nir_metadata_control_flow);
+   return progress;
+}
+
 static void
 kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
              const struct vk_pipeline_robustness_state *rs,
@@ -1130,9 +1249,8 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
    NIR_PASS(_, nir, kk_nir_lower_ssbo_residency,
             kk_buffer_addr_format(rs->storage_buffers),
             features & KK_FEAT_SPARSE_RESIDENCY);
-   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
-            kk_buffer_addr_format(rs->storage_buffers));
-   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
+   NIR_PASS(_, nir, kk_lower_buffer_io,
+            kk_buffer_addr_format(rs->storage_buffers),
             kk_buffer_addr_format(rs->uniform_buffers));
 
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,

@@ -160,6 +160,7 @@ update_instr_type(struct hash_table *types, nir_instr *instr, ti_type type)
          set_type(types, &intr->def, type);
          return true;
       case nir_intrinsic_load_global:
+      case nir_intrinsic_load_global_bounded:
       case nir_intrinsic_load_global_constant:
       case nir_intrinsic_load_global_constant_bounded:
       case nir_intrinsic_load_global_constant_offset:
@@ -290,6 +291,7 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
       set_type(types, &instr->def, TYPE_GENERIC_DATA);
       set_type(types, &instr->src[0], TYPE_UINT);
       break;
+   case nir_intrinsic_load_global_bounded:
    case nir_intrinsic_load_global_constant_bounded:
       set_type(types, &instr->def, TYPE_GENERIC_DATA);
       set_type(types, &instr->src[0], TYPE_UINT);
