@@ -3882,6 +3882,11 @@ zink_batch_rp(struct zink_context *ctx)
       ctx->rp_tc_info_updated = false;
    }
    bool maybe_has_query_ends = !ctx->track_renderpasses || ctx->dynamic_fb.tc_info.has_query_ends;
+   /* a query that would share a Vulkan query begun before this renderpass
+    * waits for it to end, which can only happen outside of the renderpass
+    */
+   if (maybe_has_query_ends && !ctx->queries_disabled && zink_query_resume_conflicts(ctx))
+      maybe_has_query_ends = false;
    ctx->queries_in_rp = maybe_has_query_ends;
    /* if possible, out-of-renderpass resume any queries that were stopped when previous rp ended */
    if (!ctx->queries_disabled && !maybe_has_query_ends && !list_is_empty(&ctx->suspended_queries)) {

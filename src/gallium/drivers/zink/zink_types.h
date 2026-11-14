@@ -2166,6 +2166,14 @@ struct zink_context {
    struct list_head suspended_queries;
    struct list_head primitives_generated_queries;
    struct zink_query *vertices_query;
+   /* the pipeline statistics queries the one active Vulkan statistics query counts for */
+   struct list_head stats_queries;
+   struct zink_vk_query *curr_stats_query;
+   VkQueryPipelineStatisticFlags curr_stats_bits;
+   /* queries wait to begin with others, or lost a Vulkan query they share:
+    * the next draw or dispatch ends and begins every query (zink_query_apply_changes)
+    */
+   bool queries_changed;
    bool disable_fs;
    bool disable_color_writes;
    bool was_line_loop;
