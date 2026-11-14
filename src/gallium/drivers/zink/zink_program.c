@@ -2093,9 +2093,12 @@ bind_gfx_stage(struct zink_context *ctx, mesa_shader_stage stage, struct zink_sh
          ctx->mesh_hash ^= ctx->gfx_stages[stage]->hash;
    }
 
-   if (stage == MESA_SHADER_GEOMETRY && ctx->is_generated_gs_bound && (!shader || !shader->non_fs.parent)) {
-      ctx->inlinable_uniforms_valid_mask &= ~BITFIELD64_BIT(MESA_SHADER_GEOMETRY);
-      ctx->is_generated_gs_bound = false;
+   if (stage == MESA_SHADER_GEOMETRY) {
+      /* set again when the blitter restores a generated shader it saved */
+      const bool generated = shader && shader->non_fs.parent;
+      if (ctx->is_generated_gs_bound && !generated)
+         ctx->inlinable_uniforms_valid_mask &= ~BITFIELD64_BIT(MESA_SHADER_GEOMETRY);
+      ctx->is_generated_gs_bound = generated;
    }
 
    ctx->gfx_stages[stage] = shader;
