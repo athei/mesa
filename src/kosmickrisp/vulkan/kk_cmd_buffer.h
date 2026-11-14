@@ -324,6 +324,8 @@ struct kk_cmd_buffer {
     * into (uint32_t), held until it is reset or destroyed, when it can no
     * longer be pending. */
    struct util_dynarray ts_entries;
+   /* The indirect command buffers its draws use (struct kk_icb *) */
+   struct util_dynarray icbs;
    /* Deferred writes due to being mid render encoder */
    struct util_dynarray post_render_writes;
    struct util_dynarray post_render_stats;

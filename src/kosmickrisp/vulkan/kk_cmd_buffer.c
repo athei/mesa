@@ -12,6 +12,7 @@
 #include "kk_descriptor_set_layout.h"
 #include "kk_entrypoints.h"
 #include "kk_format.h"
+#include "kk_icb.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
 #include "kk_query_pool.h"
@@ -61,6 +62,7 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
    util_dynarray_clear(&cmd->ts_resolves);
    util_dynarray_clear(&cmd->ts_stage_map);
    kk_timestamp_entries_release(dev, &cmd->ts_entries);
+   kk_icbs_release(dev, &cmd->icbs);
 }
 
 /* Ends Metal command buffer recording and returns allocator to pool for reuse */
@@ -104,6 +106,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->ts_resolves);
    util_dynarray_fini(&cmd->ts_stage_map);
    util_dynarray_fini(&cmd->ts_entries);
+   util_dynarray_fini(&cmd->icbs);
 
    vk_free(&pool->vk.alloc, cmd);
 }
@@ -136,6 +139,7 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->ts_resolves = UTIL_DYNARRAY_INIT;
    cmd->ts_stage_map = UTIL_DYNARRAY_INIT;
    cmd->ts_entries = UTIL_DYNARRAY_INIT;
+   cmd->icbs = UTIL_DYNARRAY_INIT;
    cmd->post_render_writes = UTIL_DYNARRAY_INIT;
    cmd->post_render_stats = UTIL_DYNARRAY_INIT;
 

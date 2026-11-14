@@ -12,7 +12,9 @@
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
 #include "kk_cmd_dgc.h"
+#include "kk_debug.h"
 #include "kk_format.h"
+#include "kk_icb.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
 #include "kk_query_pool.h"
@@ -2737,10 +2739,142 @@ kk_stats_draw(struct kk_cmd_buffer *cmd, const struct kk_draw_command *data)
    }
 }
 
+/* Indirect-count draws with at least this many slots run from an indirect
+ * command buffer, which a kernel fills with the draws below the count, rather
+ * than as one Metal draw per slot. Measured on an M5 Max, GPU time:
+ * - Such a call costs about 48 us with 32 draws below the count, 12 to 15 us
+ *   more than the per-slot path, and 117 ns for each further draw. That holds
+ *   up to 4096 slots: the kernel runs a threadgroup per slot, so a call of
+ *   65536 slots with 32 draws costs 85 us.
+ * - The per-slot path costs 35 ns per empty slot of an indexed call (20 ns
+ *   non-indexed) and 26 to 68 ns more for a slot that draws.
+ * - With few draws below the count the paths meet near 540 slots for
+ *   indexed draws and 830 for the others, hence this threshold.
+ * - The more of its slots draw, the less the indirect command buffer wins:
+ *   an indexed call costs the same on both paths when 25 % of 1024 slots
+ *   draw, 37 % of 2048 or 42 % of 4096, and 34 to 38 % more from the
+ *   indirect command buffer when all draw. The count is not known when the
+ *   call is recorded, so the driver cannot choose by it. */
+#define KK_ICB_MIN_DRAWS 1024u
+/* Bounds the memory of an indirect command buffer, about 750 B per slot */
+#define KK_ICB_MAX_DRAWS 65536u
+
+static bool
+kk_can_draw_icb(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+   uint32_t min_draws = KK_DEBUG(FORCE_ICB) ? 1u : KK_ICB_MIN_DRAWS;
+
+   if (data->predicate_count == 0 ||
+       data->predicate_op[0] != KK_PREDICATE_GT_DRAW_ID ||
+       data->draw_count < min_draws || data->draw_count > KK_ICB_MAX_DRAWS)
+      return false;
+
+   /* The bound pipeline has to support indirect command buffers. Statistics
+    * use another pipeline. */
+   if (!dev->icbs.fill || !vs || !vs->pipeline.gfx.render_icb ||
+       cmd->state.stats.active || kk_stats_fs_counter(cmd))
+      return false;
+
+   return !cmd->state.shaders[MESA_SHADER_TESS_EVAL] && !kk_gs_info(cmd) &&
+          !cmd->state.gfx.render.view_mask &&
+          !mesa_prim_has_adjacency(data->prim) && !requires_unroll(cmd, data);
+}
+
+/* Runs an indirect-count draw from an indirect command buffer. Returns false,
+ * before encoding anything, when the draw has to take the per-slot path. */
+static bool
+kk_draw_icb(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_graphics_state *gfx = &cmd->state.gfx;
+
+   if (!kk_can_draw_icb(cmd, data))
+      return false;
+
+   gfx->per_draw_data.draw_id = 0u;
+   gfx->per_draw_data.fs_invocations = 0u;
+   gfx->per_draw_data.provoking_ids = 0u;
+   struct kk_ptr per_draw =
+      kk_pool_upload(cmd, &gfx->per_draw_data, sizeof(gfx->per_draw_data), 8u);
+   struct kk_ptr range = kk_pool_alloc(cmd, 2u * sizeof(uint32_t), 4u);
+   struct kk_ptr per_draw_out = {0};
+   if (data->upload_mask)
+      per_draw_out = kk_pool_alloc(
+         cmd, data->draw_count * sizeof(struct kk_per_draw_data), 8u);
+
+   if (!per_draw.gpu || !range.gpu || (data->upload_mask && !per_draw_out.gpu))
+      return false;
+
+   struct kk_icb *icb = kk_cmd_get_icb(cmd, data->draw_count);
+   if (icb == NULL)
+      return false;
+
+   struct kk_icb_fill_args args = {
+      .icb = icb->resource_id,
+      .draws = data->indirect_command.addr,
+      .count = data->predicate_addr[0],
+      .cond = data->predicate_count > 1 ? data->predicate_addr[1] : 0u,
+      .range = range.gpu,
+      .root = gfx->descriptors.root.addr,
+      .samplers = dev->samplers.table.bo->gpu,
+      .per_draw = per_draw.gpu,
+      .per_draw_out = per_draw_out.gpu,
+      .max_draws = data->draw_count,
+      .stride_el = data->indirect_command.stride / sizeof(uint32_t),
+      .prim = mesa_prim_to_mtl_primitive_type(data->prim),
+      .cond_inverted = data->predicate_count > 1 &&
+                       data->predicate_op[1] == KK_PREDICATE_EQ_ZERO,
+      .per_draw_size_B = sizeof(struct kk_per_draw_data),
+   };
+   if (data->indexed) {
+      args.index_buffer = data->index_buffer.addr;
+      args.index_range_el = MIN2(
+         data->index_buffer.range / data->index_buffer_el_size_B, UINT32_MAX);
+      args.index_size_B = data->index_buffer_el_size_B;
+      args.heap = kk_heap(cmd);
+   }
+
+   mtl_compute_encoder *enc = cs_get_compute(cmd);
+   /* The kernel overwrites the commands that the render encoder of the
+    * command buffer's draw before this one executed */
+   mtl_barrier_after_queue_stages(
+      enc, MTL_STAGE_VERTEX | MTL_STAGE_FRAGMENT, MTL_STAGE_DISPATCH);
+   mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
+                                    MTL_STAGE_DISPATCH);
+   struct kk_ptr args_gpu = kk_pool_upload(cmd, &args, sizeof(args), 8u);
+   if (unlikely(!args_gpu.gpu))
+      return true;
+   mtl_set_address(cmd->argument_table, args_gpu.gpu, 0u);
+   mtl_compute_set_pipeline_state(enc, dev->icbs.fill);
+   mtl_dispatch_threads(
+      enc, (struct mtl_size){data->draw_count * KK_ICB_FILL_LANES, 1u, 1u},
+      (struct mtl_size){KK_ICB_FILL_LANES, 1u, 1u});
+   /* The render encoder executes what the kernel wrote */
+   mtl_barrier_after_stages(enc, MTL_STAGE_DISPATCH,
+                            MTL_STAGE_VERTEX | MTL_STAGE_FRAGMENT);
+   mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
+
+   /* The kernel split the render encoder */
+   kk_flush_gfx_state(cmd);
+   mtl_render_encoder *render = cs_get_render(cmd);
+   mtl_execute_commands_in_buffer(render, icb->handle, range.gpu);
+   /* The draws read their index copies in the geometry heap, which the next
+    * kernel that uses the heap overwrites */
+   if (data->indexed)
+      mtl_barrier_after_stages(render, MTL_STAGE_VERTEX, MTL_STAGE_DISPATCH);
+
+   return true;
+}
+
 static void
 kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
                 const struct kk_draw_roots *roots)
 {
+   if (!roots && kk_draw_icb(cmd, data))
+      return;
+
    /* Convert to indirect and process predicates. Skip draw if we fail. */
    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))
       return;

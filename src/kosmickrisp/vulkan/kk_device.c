@@ -11,6 +11,7 @@
 #include "kk_buffer_view.h"
 #include "kk_cmd_buffer.h"
 #include "kk_entrypoints.h"
+#include "kk_icb.h"
 #include "kk_image.h"
 #include "kk_image_view.h"
 #include "kk_instance.h"
@@ -392,6 +393,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_atomic64;
 
+   kk_device_init_icbs(dev);
+
    if (pdev->settings.gpu_capture_immediately) {
       mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
       dev->gpu_capture_active = true;
@@ -466,8 +469,10 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       dev->has_queue = false;
    }
 
-   /* After the queue, whose command buffers return their timestamp entries */
+   /* After the queue, whose command buffers return their timestamp entries
+    * and indirect command buffers */
    kk_device_finish_timestamps(dev);
+   kk_device_finish_icbs(dev);
 
    /* Release the residency set last once all BOs are released. */
    mtl_release(dev->residency_set.handle);

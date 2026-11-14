@@ -82,6 +82,8 @@ kk_files = files(
   'kk_event.c',
   'kk_format.h',
   'kk_format.c',
+  'kk_icb.h',
+  'kk_icb.c',
   'kk_image_layout.h',
   'kk_image_layout.c',
   'kk_image_view.h',

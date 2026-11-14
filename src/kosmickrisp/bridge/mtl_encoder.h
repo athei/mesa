@@ -146,6 +146,12 @@ void mtl_draw_indexed_primitives_indirect(mtl_render_encoder *encoder,
                                           uint64_t index_buffer_length,
                                           uint64_t addr);
 
+/* Runs the commands of the range an MTLIndirectCommandBufferExecutionRange at
+ * range_addr names */
+void mtl_execute_commands_in_buffer(mtl_render_encoder *encoder,
+                                    mtl_indirect_command_buffer *icb,
+                                    uint64_t range_addr);
+
 void mtl_compute_write_timestamp(mtl_compute_encoder *encoder,
                                  mtl_counter_heap *heap, uint32_t index);
 
