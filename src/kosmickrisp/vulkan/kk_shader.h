@@ -146,6 +146,8 @@ struct kk_pipeline_handles {
          mtl_compute_pipeline_state *gs_pre;
          mtl_depth_stencil_state *ds_handle;
          uint32_t pre_render_count;
+         /* render supports indirect command buffers */
+         bool render_icb;
       } gfx;
       mtl_compute_pipeline_state *cs;
    };
