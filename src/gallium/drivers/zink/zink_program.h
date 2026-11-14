@@ -321,6 +321,12 @@ zink_update_fs_key_samples(struct zink_context *ctx);
 void
 zink_update_fs_key_color_mode(struct zink_context *ctx);
 
+bool
+zink_set_fs_key_depth_bias(struct zink_context *ctx, bool lower);
+
+void
+zink_update_fs_key_depth_bias(struct zink_context *ctx);
+
 void
 zink_update_gs_key_rectangular_line(struct zink_context *ctx);
 
@@ -419,6 +425,8 @@ zink_can_use_pipeline_libs(const struct zink_context *ctx)
           /* TODO: is sample shading even possible to handle with GPL? */
           !ctx->gfx_stages[MESA_SHADER_FRAGMENT]->info.fs.uses_sample_shading &&
           !zink_get_fs_base_key(ctx)->fbfetch_ms &&
+          /* the fragment library is compiled without it */
+          !zink_get_fs_base_key(ctx)->lower_depth_bias &&
           !ctx->gfx_pipeline_state.force_persample_interp &&
           !ctx->gfx_pipeline_state.min_samples &&
           !ctx->fb_state.viewmask &&

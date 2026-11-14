@@ -957,7 +957,7 @@ struct zink_gfx_pipeline_state {
    uint32_t feedback_loop : 1;
    uint32_t feedback_loop_zs : 1;
    uint32_t rast_attachment_order : 1;
-   uint32_t pad : 1;
+   uint32_t depth_bias_persample : 1; //per-sample shading for lower_depth_bias (zink_set_fs_key_depth_bias)
    uint32_t rp_state : 16;
    VkSampleMask sample_mask;
    uint32_t blend_id;
@@ -1050,6 +1050,7 @@ struct zink_gfx_push_constant {
    uint32_t line_stipple_pattern;
    float viewport_scale[2];
    float line_width;
+   float depth_bias[3]; //constant, slope factor, clamp
 };
 
 /* The order of the enums MUST match the order of the zink_gfx_push_constant
@@ -1064,6 +1065,7 @@ enum zink_gfx_push_constant_member {
    ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN,
    ZINK_GFX_PUSHCONST_VIEWPORT_SCALE,
    ZINK_GFX_PUSHCONST_LINE_WIDTH,
+   ZINK_GFX_PUSHCONST_DEPTH_BIAS,
    ZINK_GFX_PUSHCONST_MAX
 };
 
@@ -1142,7 +1144,7 @@ struct zink_gfx_output_key {
          uint32_t feedback_loop : 1;
          uint32_t feedback_loop_zs : 1;
          uint32_t rast_attachment_order : 1;
-         uint32_t custom_sample_locations : 1;
+         uint32_t depth_bias_persample : 1;
          uint32_t rp_state : 16;
       };
       uint32_t key;
@@ -2168,6 +2170,7 @@ struct zink_context {
    bool disable_color_writes;
    bool was_line_loop;
    bool was_using_depth_bias;
+   bool was_using_triangle_depth_bias; //was_using_depth_bias for filled triangles
    bool fs_query_active;
    bool occlusion_query_active;
    bool primitives_generated_active;
