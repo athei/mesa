@@ -1133,6 +1133,41 @@ global_access_qualifier(struct nir_to_msl_ctx *ctx,
    return access & ACCESS_COHERENT ? "coherent device" : "device";
 }
 
+/* Prints "<condition> ? <load> : 0" for a bounded load: the load happens only
+ * when its last byte is below the bound. The offset is clamped first so that
+ * adding the size cannot wrap around. */
+static void
+bounded_load_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+                    const char *qualifier)
+{
+   const char *type = msl_type_for_def(ctx->types, &instr->def);
+   unsigned last = instr->def.num_components * instr->def.bit_size / 8 - 1;
+
+   if (last == 0) {
+      src_to_msl(ctx, &instr->src[1]);
+   } else {
+      P(ctx, "min(");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, ", %uu) + %uu", UINT32_MAX - last, last);
+   }
+   P(ctx, " < ");
+   src_to_msl(ctx, &instr->src[2]);
+   P(ctx, " ? ");
+   if (nir_intrinsic_access(instr) & ACCESS_ATOMIC) {
+      assert(instr->num_components == 1u &&
+             "We can only do single component with atomics");
+      P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, type);
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, " + ");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, "), memory_order_relaxed)");
+   } else {
+      src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], qualifier,
+                                type, instr->def.num_components);
+   }
+   P(ctx, " : %s(0);\n", type);
+}
+
 static void
 intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
 {
@@ -1415,17 +1450,14 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       P(ctx, ";\n");
       break;
    }
-   case nir_intrinsic_load_global_constant_bounded: {
-      src_to_msl(ctx, &instr->src[1]);
-      P(ctx, " < ");
-      src_to_msl(ctx, &instr->src[2]);
-      P(ctx, " ? ");
-      src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
-                                msl_type_for_def(ctx->types, &instr->def),
-                                instr->def.num_components);
-      P(ctx, " : 0;\n");
+   case nir_intrinsic_load_global_constant_bounded:
+      bounded_load_to_msl(ctx, instr, "constant");
       break;
-   }
+   case nir_intrinsic_load_global_bounded:
+      bounded_load_to_msl(
+         ctx, instr,
+         global_access_qualifier(ctx, nir_intrinsic_access(instr)));
+      break;
    case nir_intrinsic_load_global_constant_offset: {
       enum gl_access_qualifier access = nir_intrinsic_access(instr);
       const char *type = msl_type_for_def(ctx->types, &instr->def);

@@ -475,6 +475,7 @@ is_atomic64(const nir_intrinsic_instr *intrin)
    case nir_intrinsic_bindless_image_atomic_swap:
       return intrin->def.bit_size == 64;
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_bounded:
    case nir_intrinsic_load_global_constant_offset:
       return intrin->def.bit_size == 64 &&
              (nir_intrinsic_access(intrin) & ACCESS_ATOMIC);
@@ -510,6 +511,7 @@ lower_atomic(nir_builder *b, nir_intrinsic_instr *intrin, uint8_t *locked_out,
    b->cursor = nir_before_instr(&intrin->instr);
 
    if (intrin->intrinsic == nir_intrinsic_load_global ||
+       intrin->intrinsic == nir_intrinsic_load_global_bounded ||
        intrin->intrinsic == nir_intrinsic_load_global_constant_offset ||
        intrin->intrinsic == nir_intrinsic_load_shared ||
        intrin->intrinsic == nir_intrinsic_bindless_image_load) {

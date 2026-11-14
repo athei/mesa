@@ -127,6 +127,7 @@ static const nir_shader_compiler_options kk_nir_options = {
    .has_uclz = true,
    .lower_mul_2x32_64 = true,
    .compact_arrays = true,
+   .has_load_global_bounded = true,
    /* Metal does not support double. */
    .lower_doubles_options = (nir_lower_doubles_options)(~0),
    .lower_int64_options = nir_lower_ufind_msb64 | nir_lower_subgroup_shuffle64,
