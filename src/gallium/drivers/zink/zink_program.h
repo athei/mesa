@@ -321,6 +321,12 @@ zink_update_fs_key_samples(struct zink_context *ctx);
 void
 zink_update_fs_key_color_mode(struct zink_context *ctx);
 
+bool
+zink_set_fs_key_depth_bias(struct zink_context *ctx, bool lower);
+
+void
+zink_update_fs_key_depth_bias(struct zink_context *ctx);
+
 void
 zink_update_gs_key_rectangular_line(struct zink_context *ctx);
 
@@ -362,7 +368,10 @@ static inline void
 zink_set_fs_point_coord_key(struct zink_context *ctx)
 {
    const struct zink_fs_key_base *fs = zink_get_fs_base_key(ctx);
-   bool disable = ctx->gfx_pipeline_state.rast_prim != MESA_PRIM_POINTS;
+   /* the bias holds the byte; zink_set_fs_key_depth_bias calls this again when it clears it */
+   if (fs->lower_depth_bias)
+      return;
+   bool disable = !ctx->rast_state || ctx->gfx_pipeline_state.rast_prim != MESA_PRIM_POINTS;
    uint8_t coord_replace_bits = disable ? 0 : ctx->rast_state->base.sprite_coord_enable;
    bool point_coord_yinvert = disable ? false : !!ctx->rast_state->base.sprite_coord_mode;
    if (fs->coord_replace_bits != coord_replace_bits || fs->point_coord_yinvert != point_coord_yinvert) {
@@ -419,6 +428,8 @@ zink_can_use_pipeline_libs(const struct zink_context *ctx)
           /* TODO: is sample shading even possible to handle with GPL? */
           !ctx->gfx_stages[MESA_SHADER_FRAGMENT]->info.fs.uses_sample_shading &&
           !zink_get_fs_base_key(ctx)->fbfetch_ms &&
+          /* the fragment library is compiled without it */
+          !zink_get_fs_base_key(ctx)->lower_depth_bias &&
           !ctx->gfx_pipeline_state.force_persample_interp &&
           !ctx->gfx_pipeline_state.min_samples &&
           !ctx->fb_state.viewmask &&

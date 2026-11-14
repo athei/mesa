@@ -2328,6 +2328,99 @@ zink_update_fs_key_color_mode(struct zink_context *ctx)
       zink_update_dirty_gfx_stages(ctx, BITFIELD_BIT(MESA_SHADER_FRAGMENT));
 }
 
+/* whether the draw's depth bias is applied in the fragment shader (lower_depth_bias_fs)
+ *
+ * Only a constant bias is wrong in hardware: the slope term does not depend on the format.
+ * The hardware bias stays where the shader cannot apply it: a shader that writes depth or
+ * tests depth before it runs. So do lines and points, which some drivers offset too
+ * (offset_all_prims), and polygons drawn as lines or points, whose fragments do not have
+ * the polygon's depth slope in their derivatives. On a multisampled framebuffer one
+ * shader depth would replace the depth of every sample, so the draw runs per sample
+ * (depth_bias_persample). It keeps the hardware bias there without sample rate shading,
+ * and for the shaders that would see the difference: one that writes memory, whose stores
+ * and atomics would run once per sample, and one that reads gl_SampleMaskIn, which would
+ * hold only the shaded sample instead of the fragment's coverage. Other inputs need no
+ * exclusion: a shader that reads gl_SampleID or gl_SamplePosition runs per sample already,
+ * and a centroid input may be interpolated at the sample under sample shading.
+ */
+static bool
+zink_fs_lowers_depth_bias(const struct zink_context *ctx)
+{
+   const struct zink_screen *screen = zink_screen(ctx->base.screen);
+   const struct zink_shader *fs = ctx->gfx_stages[MESA_SHADER_FRAGMENT];
+   if (!ctx->was_using_triangle_depth_bias || !ctx->rast_state || ctx->rast_state->offset_units == 0.0f ||
+       !fs || fs->info.fs.early_fragment_tests || (fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)))
+      return false;
+   if (ctx->fb_state.samples > 1 &&
+       (!screen->info.feats.features.sampleRateShading || fs->info.writes_memory ||
+        BITSET_TEST(fs->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN)))
+      return false;
+   switch (ctx->fb_state.zsbuf.format) {
+   case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+      return !screen->have_D24_UNORM_S8_UINT;
+   case PIPE_FORMAT_Z24X8_UNORM:
+      return !screen->have_X8_D24_UNORM_PACK32;
+   default:
+      return false;
+   }
+}
+
+/* the layout of the depth lower_depth_bias_fs writes
+ *
+ * The shader writes saturate(z + bias). The slope term is never negative, so the bias has the
+ * sign of the constant for every fragment when the factor is 0 or has that sign too, and the
+ * clamp only bounds it on the side of 0. Rounding and saturation keep the sum on the side of z
+ * while z is in [0, 1], which depth clamping and disabled depth clipping do not ensure. An
+ * infinite factor times a zero slope is NaN, which saturates to 0.
+ */
+static enum gl_frag_depth_layout
+zink_depth_bias_layout(const struct zink_rasterizer_state *rs)
+{
+   if (rs->hw_state.depth_clamp || !rs->hw_state.depth_clip || !isfinite(rs->offset_scale))
+      return FRAG_DEPTH_LAYOUT_ANY;
+   if (rs->offset_units > 0.0f && rs->offset_scale >= 0.0f)
+      return FRAG_DEPTH_LAYOUT_GREATER;
+   if (rs->offset_units < 0.0f && rs->offset_scale <= 0.0f)
+      return FRAG_DEPTH_LAYOUT_LESS;
+   return FRAG_DEPTH_LAYOUT_ANY;
+}
+
+bool
+zink_set_fs_key_depth_bias(struct zink_context *ctx, bool lower)
+{
+   /* each sample gets the depth of its own invocation, which reads z at the sample */
+   const bool per_sample = lower && ctx->fb_state.samples > 1;
+   if (per_sample != ctx->gfx_pipeline_state.depth_bias_persample) {
+      ctx->gfx_pipeline_state.depth_bias_persample = per_sample;
+      zink_gfx_mesh_pipeline_state_dirty(ctx);
+   }
+   const struct zink_fs_key_base *fs = zink_get_fs_base_key(ctx);
+   const uint8_t layout = lower ? zink_depth_bias_layout(ctx->rast_state) : FRAG_DEPTH_LAYOUT_NONE;
+   if (lower == fs->lower_depth_bias && (!lower || layout == fs->depth_bias_layout))
+      return false;
+   struct zink_fs_key_base *key = zink_set_fs_base_key(ctx);
+   key->lower_depth_bias = lower;
+   if (lower)
+      key->depth_bias_layout = layout;
+   else
+      /* the byte holds the point coord bits again */
+      zink_set_fs_point_coord_key(ctx);
+   /* a program with a generated geometry shader takes the full keys (zink_gfx_program_update) */
+   if (zink_screen(ctx->base.screen)->optimal_keys) {
+      struct zink_fs_key_base *full = &ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.base;
+      full->lower_depth_bias = lower;
+      full->depth_bias_layout = layout;
+   }
+   zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
+   return true;
+}
+
+void
+zink_update_fs_key_depth_bias(struct zink_context *ctx)
+{
+   zink_set_fs_key_depth_bias(ctx, zink_fs_lowers_depth_bias(ctx));
+}
+
 /* mesh programs don't compile draw variants in the background, so NONE falls back to the mode it shadows */
 static uint32_t
 zink_mesh_optimal_key(struct zink_context *ctx)
@@ -2376,6 +2469,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
       }
       zink_update_fs_key_samples(ctx);
       zink_update_fs_key_color_mode(ctx);
+      zink_update_fs_key_depth_bias(ctx);
       if (zink_screen(pctx->screen)->info.have_EXT_rasterization_order_attachment_access) {
          if (ctx->gfx_pipeline_state.rast_attachment_order != info->fs.uses_fbfetch_output)
             zink_gfx_mesh_pipeline_state_dirty(ctx);

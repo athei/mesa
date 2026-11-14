@@ -97,8 +97,14 @@ struct zink_fs_key_base {
    bool fbfetch_ms : 1;
    bool shadow_needs_shader_swizzle : 1; //append zink_zs_swizzle_key after the key data
    uint8_t color_mode : 2; //enum zink_fs_color_mode
-   uint8_t pad : 1;
-   uint8_t coord_replace_bits;
+   bool lower_depth_bias : 1; //the depth bias of emulated D24 is applied in the shader
+   /* lower_depth_bias is only set for filled triangles, which have no point coord to replace,
+    * so the byte is free for the bias then (zink_set_fs_key_depth_bias)
+    */
+   union {
+      uint8_t coord_replace_bits; //without lower_depth_bias
+      uint8_t depth_bias_layout; //with it: the enum gl_frag_depth_layout of the biased depth
+   };
 };
 
 struct zink_fs_key {
