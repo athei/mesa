@@ -12,6 +12,7 @@
 #include <Metal/MTL4ComputeCommandEncoder.h>
 #include <Metal/MTL4Counters.h>
 #include <Metal/MTL4RenderCommandEncoder.h>
+#include <Metal/MTLIndirectCommandBuffer.h>
 #include <Metal/MTLRenderPass.h>
 
 /* Device visibility does not make the aliases of memory that sparse
@@ -537,6 +538,18 @@ mtl_draw_indexed_primitives_indirect(mtl_render_encoder *encoder,
                      indexBuffer:index_addr
                indexBufferLength:index_buffer_length
                   indirectBuffer:addr];
+   }
+}
+
+void
+mtl_execute_commands_in_buffer(mtl_render_encoder *encoder,
+                               mtl_indirect_command_buffer *icb,
+                               uint64_t range_addr)
+{
+   @autoreleasepool {
+      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+      [enc executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb
+                    indirectBuffer:range_addr];
    }
 }
 

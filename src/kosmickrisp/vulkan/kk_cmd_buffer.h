@@ -326,6 +326,8 @@ struct kk_cmd_buffer {
     * into (uint32_t), held until it is reset or destroyed, when it can no
     * longer be pending. */
    struct util_dynarray ts_entries;
+   /* The indirect command buffers its draws use (struct kk_icb *) */
+   struct util_dynarray icbs;
    /* Deferred writes due to being mid render encoder */
    struct util_dynarray post_render_writes;
    struct util_dynarray post_render_stats;
@@ -397,6 +399,16 @@ void cs_start_render(struct kk_cmd_buffer *cmd);
 mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
 mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd);
 void cs_end(struct kk_cmd_buffer *cmd);
+
+/* The visibility of a barrier between the current encoder and the next ones */
+static inline enum mtl_visibility_options
+kk_queue_barrier_visibility(const struct kk_cmd_buffer *cmd)
+{
+   return cmd->state.gfx.occlusion.visibility_used
+             ? MTL_VISIBILITY_OPTION_RESOURCE_ALIAS
+             : MTL_VISIBILITY_OPTION_DEVICE;
+}
+
 void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
                                         uint64_t addr);
 

@@ -76,4 +76,13 @@ mtl_buffer *mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
 mtl_command_allocator *mtl_new_command_allocator(mtl_device *device);
 mtl_command_buffer *mtl_new_command_buffer(mtl_device *device);
 
+/* Draws that a kernel encodes. Each command sets vertex and fragment buffers
+ * 0 to buffer_count - 1 and inherits the pipeline and the rest of the state
+ * from the render encoder that executes it. */
+mtl_indirect_command_buffer *
+mtl_new_indirect_command_buffer(mtl_device *device, uint32_t max_commands,
+                                uint32_t buffer_count);
+uint64_t
+mtl_indirect_command_buffer_get_resource_id(mtl_indirect_command_buffer *icb);
+
 #endif /* MTL_DEVICE_H */

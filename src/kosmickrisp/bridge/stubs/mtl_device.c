@@ -193,3 +193,16 @@ mtl_new_command_buffer(mtl_device *device)
 {
    return NULL;
 }
+
+mtl_indirect_command_buffer *
+mtl_new_indirect_command_buffer(mtl_device *device, uint32_t max_commands,
+                                uint32_t buffer_count)
+{
+   return NULL;
+}
+
+uint64_t
+mtl_indirect_command_buffer_get_resource_id(mtl_indirect_command_buffer *icb)
+{
+   return 0u;
+}

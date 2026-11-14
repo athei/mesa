@@ -109,6 +109,14 @@ struct kk_device {
       struct util_dynarray free;
    } timestamps;
 
+   /* Indirect command buffers no command buffer holds (struct kk_icb *),
+    * and the kernel that fills them (kk_icb.c) */
+   struct {
+      simple_mtx_t lock;
+      struct util_dynarray free;
+      mtl_compute_pipeline_state *fill;
+   } icbs;
+
    /* Track all heaps the user allocated so we can set them all as resident when
     * recording as required by Metal. */
    struct kk_residency_set residency_set;

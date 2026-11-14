@@ -2252,9 +2252,11 @@ gather_graphics_pipeline_create_info(
       vk_primitive_topology_to_mtl_primitive_topology_class(topology);
 }
 
+/* With icb, the pipeline supports indirect command buffers if Metal accepts
+ * that for its shaders, and *icb says whether it does. */
 static mtl_render_pipeline_state *
 kk_new_render_pipeline(struct kk_device *device, struct kk_shader *vs,
-                       const struct msl_compile_data *fs_data)
+                       const struct msl_compile_data *fs_data, bool *icb)
 {
    struct kk_physical_device *pdev = kk_device_physical(device);
    mtl_render_pipeline_state *render = NULL;
@@ -2324,8 +2326,23 @@ kk_new_render_pipeline(struct kk_device *device, struct kk_shader *vs,
          pipeline_descriptor, 0, &vs->info.vs.rt0_blend);
    }
 
-   render =
-      mtl_new_render_pipeline(device->mtl_compiler_handle, pipeline_descriptor);
+   if (icb && *icb) {
+      mtl_render_pipeline_descriptor_set_support_indirect_command_buffers(
+         pipeline_descriptor, true);
+      render = mtl_new_render_pipeline(device->mtl_compiler_handle,
+                                       pipeline_descriptor, false);
+      if (render == NULL) {
+         /* Metal refuses indirect command buffers for some shaders ("AGX:
+          * second-level indirections not handled in EI uniform ABI") */
+         *icb = false;
+         mtl_render_pipeline_descriptor_set_support_indirect_command_buffers(
+            pipeline_descriptor, false);
+      }
+   }
+
+   if (render == NULL)
+      render = mtl_new_render_pipeline(device->mtl_compiler_handle,
+                                       pipeline_descriptor, true);
 
    mtl_release(pipeline_descriptor);
    mtl_release(fragment_function);
@@ -2393,8 +2410,13 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
       pipe->gfx.ds_handle = kk_compile_ds_state(device, &vs->info);
    }
 
+   /* Only draws without a tessellation or geometry stage run from indirect
+    * command buffers */
+   pipe->gfx.render_icb = !(vs->info.vs.additional_stages_bits &
+                            (BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
+                             BITFIELD_BIT(MESA_SHADER_GEOMETRY)));
    pipe->gfx.render = kk_new_render_pipeline(
-      device, vs, &vs->msl_data[MESA_SHADER_FRAGMENT]);
+      device, vs, &vs->msl_data[MESA_SHADER_FRAGMENT], &pipe->gfx.render_icb);
    if (pipe->gfx.render == NULL)
       result = VK_ERROR_INVALID_SHADER_NV;
 
@@ -2408,7 +2430,7 @@ kk_shader_get_stats_pipeline(struct kk_device *dev, struct kk_shader *vs)
    if (render || !vs->info.has_fs_stats)
       return render;
 
-   render = kk_new_render_pipeline(dev, vs, &vs->fs_stats);
+   render = kk_new_render_pipeline(dev, vs, &vs->fs_stats, NULL);
    if (render == NULL)
       return NULL;
 
