@@ -53,6 +53,12 @@ void
 zink_query_update_gs_states(struct zink_context *ctx);
 
 void
+zink_query_apply_changes(struct zink_context *ctx);
+
+bool
+zink_query_resume_conflicts(struct zink_context *ctx);
+
+void
 zink_start_conditional_render(struct zink_context *ctx);
 
 void

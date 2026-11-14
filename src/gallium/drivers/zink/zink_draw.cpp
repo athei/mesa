@@ -633,7 +633,8 @@ validate_atoms(const struct zink_context *ctx)
    assert(!ctx->memory_barrier || zink_is_atom_dirty(ctx, ZINK_ATOM_MEMORY_BARRIER));
    assert(!ctx->num_so_targets || zink_is_atom_dirty(ctx, ZINK_ATOM_STREAMOUT));
    assert(!ctx->need_barriers[0]->entries || zink_is_atom_dirty(ctx, ZINK_ATOM_BARRIERS));
-   assert((!ctx->vertices_query && list_is_empty(&ctx->primitives_generated_queries)) ||
+   assert((!ctx->vertices_query && list_is_empty(&ctx->primitives_generated_queries) &&
+           !ctx->queries_changed) ||
           zink_is_atom_dirty(ctx, ZINK_ATOM_GS_QUERIES));
    assert(!(zink_debug & ZINK_DEBUG_SYNC) || zink_is_atom_dirty(ctx, ZINK_ATOM_DEBUG_SYNC));
    assert(!ctx->shader_reads_drawid || zink_is_atom_dirty(ctx, ZINK_ATOM_DRAW_ID));
@@ -929,6 +930,8 @@ zink_draw_atoms(struct zink_context *ctx,
                zink_mark_atom_dirty(ctx, ZINK_ATOM_BARRIERS);
             break;
          case ZINK_ATOM_GS_QUERIES:
+            if (unlikely(ctx->queries_changed))
+               zink_query_apply_changes(ctx);
             if (ctx->vertices_query || !list_is_empty(&ctx->primitives_generated_queries)) {
                zink_mark_atom_dirty(ctx, ZINK_ATOM_GS_QUERIES);
                zink_query_update_gs_states(ctx);
@@ -1405,6 +1408,8 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
                                 0, 1, &mb, 0, NULL, 0, NULL);
    }
 
+   if (unlikely(ctx->queries_changed))
+      zink_query_apply_changes(ctx);
    bool need_rp_update = !ctx->in_rp || ctx->rp_changed;
    zink_batch_rp(ctx);
    /* check dead swapchain */
