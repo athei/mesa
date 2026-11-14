@@ -526,17 +526,59 @@ gather_fs_input_interpolant_usage(nir_builder *b, nir_intrinsic_instr *intr,
    return at_sample;
 }
 
+struct lower_sample_shading_state {
+   bool uses_interpolant[NUM_TOTAL_VARYING_SLOTS];
+   /* the fragment coordinate at the sample, computed at the top of the shader,
+    * and the load it is computed from */
+   nir_def *frag_coord;
+   nir_def *sample_frag_coord;
+};
+
+/* which components of the fragment coordinate the shader reads */
+static bool
+gather_frag_coord_reads(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic == nir_intrinsic_load_frag_coord) {
+      nir_component_mask_t *read = data;
+      *read |= nir_def_components_read(&intr->def);
+   }
+   return false;
+}
+
+/* Metal's [[position]] is the pixel centre also when the fragment shader runs
+ * per sample. x and y move to the sample by its offset from the centre, and z,
+ * when the shader reads it, by its derivatives over that offset, which for a
+ * primitive's planar depth is the depth interpolated at the sample. The
+ * derivatives are taken at the top of the shader, where control flow is
+ * uniform. */
+static nir_def *
+load_sample_frag_coord(nir_builder *b, nir_def *frag_coord, bool reads_z)
+{
+   nir_def *offset =
+      nir_fadd(b, nir_load_sample_pos_from_id(b, 32u, nir_load_sample_id(b)),
+               nir_imm_vec2(b, -0.5f, -0.5f));
+   nir_def *sample_position =
+      nir_fadd(b, frag_coord, nir_pad_vector_imm_int(b, offset, 0u, 4u));
+   if (!reads_z)
+      return sample_position;
+   nir_def *z = nir_channel(b, frag_coord, 2);
+   nir_def *sample_z =
+      nir_ffma(b, nir_ddy(b, z), nir_channel(b, offset, 1),
+               nir_ffma(b, nir_ddx(b, z), nir_channel(b, offset, 0), z));
+   return nir_vector_insert_imm(b, sample_position, sample_z, 2);
+}
+
 static bool
 lower_sample_shading(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
+   struct lower_sample_shading_state *state = data;
+
    if (intr->intrinsic == nir_intrinsic_load_frag_coord) {
-      b->cursor = nir_after_instr(&intr->instr);
-      nir_def *offset =
-         nir_fadd(b, nir_load_sample_pos_from_id(b, 32u, nir_load_sample_id(b)),
-                  nir_imm_vec2(b, -0.5f, -0.5f));
-      nir_def *sample_position =
-         nir_fadd(b, &intr->def, nir_pad_vector_imm_int(b, offset, 0u, 4u));
-      nir_def_rewrite_uses_after(&intr->def, sample_position);
+      /* without one, no load of the shader is read */
+      if (!state->sample_frag_coord || &intr->def == state->frag_coord)
+         return false;
+      nir_def_rewrite_uses(&intr->def, state->sample_frag_coord);
+      nir_instr_remove(&intr->instr);
       return true;
    }
 
@@ -552,10 +594,9 @@ lower_sample_shading(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    if (intr->intrinsic != nir_intrinsic_load_interpolated_input)
       return false;
 
-   bool *uses_interpolant = (bool *)data;
    struct nir_io_semantics io = nir_intrinsic_io_semantics(intr);
    nir_intrinsic_instr *interpolation = nir_src_as_intrinsic(intr->src[0]);
-   if (!uses_interpolant[io.location] ||
+   if (!state->uses_interpolant[io.location] ||
        interpolation->intrinsic != nir_intrinsic_load_barycentric_sample)
       return false;
 
@@ -573,14 +614,28 @@ msl_nir_lower_sample_shading(nir_shader *nir)
 {
    assert(nir->info.stage == MESA_SHADER_FRAGMENT);
 
-   bool uses_interpolant[NUM_TOTAL_VARYING_SLOTS] = {};
+   struct lower_sample_shading_state state = {};
 
    if (nir_shader_intrinsics_pass(nir, gather_fs_input_interpolant_usage,
-                                  nir_metadata_all, uses_interpolant))
+                                  nir_metadata_all, state.uses_interpolant))
       BITSET_SET(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_ID);
 
-   return nir_shader_intrinsics_pass(
-      nir, lower_sample_shading, nir_metadata_control_flow, uses_interpolant);
+   nir_component_mask_t frag_coord_read = 0;
+   nir_shader_intrinsics_pass(nir, gather_frag_coord_reads, nir_metadata_all,
+                              &frag_coord_read);
+   bool progress = false;
+   if (frag_coord_read) {
+      nir_builder b =
+         nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+      state.frag_coord = nir_load_frag_coord(&b);
+      state.sample_frag_coord = load_sample_frag_coord(
+         &b, state.frag_coord, frag_coord_read & BITFIELD_BIT(2));
+      progress = true;
+   }
+
+   return nir_shader_intrinsics_pass(nir, lower_sample_shading,
+                                     nir_metadata_control_flow, &state) ||
+          progress;
 }
 
 static bool
