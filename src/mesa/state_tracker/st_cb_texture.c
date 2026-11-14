@@ -1865,7 +1865,8 @@ try_pbo_upload(struct gl_context *ctx, GLuint dims,
    struct pipe_resource *texture = stImage->pt;
    struct pipe_screen *screen = st->screen;
    struct st_pbo_addresses addr;
-   enum pipe_format src_format;
+   enum pipe_format src_format, copy_format;
+   const enum pipe_format view_format = dst_format;
    const struct util_format_description *desc;
    GLenum gl_target = texImage->TexObject->Target;
    bool success;
@@ -1915,6 +1916,22 @@ try_pbo_upload(struct gl_context *ctx, GLuint dims,
                                        0, PIPE_BIND_RENDER_TARGET)) {
          return false;
       }
+   }
+
+   /* Texels the shader's float conversion would change are copied as
+    * unsigned integers (st_pbo_get_copy_format).
+    */
+   if (_mesa_format_matches_format_and_type(texImage->TexFormat, format, type,
+                                            unpack->SwapBytes, NULL) &&
+       st_pbo_get_copy_format(texture, view_format, &copy_format)) {
+      if (!copy_format ||
+          !screen->is_format_supported(screen, copy_format, texture->target,
+                                       texture->nr_samples,
+                                       texture->nr_storage_samples,
+                                       PIPE_BIND_RENDER_TARGET))
+         return false;
+      src_format = dst_format = copy_format;
+      desc = util_format_description(src_format);
    }
 
    if (!src_format ||
@@ -2744,8 +2761,27 @@ st_GetTexSubImage(struct gl_context * ctx,
       goto non_blit_transfer;
 
    if (st->pbo.download_enabled && ctx->Pack.BufferObj) {
-      if (try_pbo_download(st, texImage,
-                           src_format, dst_format,
+      enum pipe_format pbo_src_format = src_format, pbo_dst_format = dst_format;
+      enum pipe_format copy_format;
+
+      /* Texels the shader's float conversion would change are copied as
+       * unsigned integers (st_pbo_get_copy_format).
+       */
+      if (_mesa_format_matches_format_and_type(texImage->TexFormat, format,
+                                               type, ctx->Pack.SwapBytes, NULL) &&
+          st_pbo_get_copy_format(src, src_format, &copy_format)) {
+         pbo_src_format = pbo_dst_format = copy_format;
+         if (copy_format &&
+             !screen->is_format_supported(screen, copy_format, src->target,
+                                          src->nr_samples,
+                                          src->nr_storage_samples,
+                                          PIPE_BIND_SAMPLER_VIEW))
+            pbo_src_format = PIPE_FORMAT_NONE;
+      }
+
+      if (pbo_src_format &&
+          try_pbo_download(st, texImage,
+                           pbo_src_format, pbo_dst_format,
                            xoffset, yoffset, zoffset,
                            width, height, depth,
                            &ctx->Pack, pixels))

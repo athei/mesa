@@ -111,6 +111,10 @@ st_pbo_get_download_fs(struct st_context *st, enum pipe_texture_target target,
                        bool need_layer);
 
 bool
+st_pbo_get_copy_format(const struct pipe_resource *texture, enum pipe_format format,
+                       enum pipe_format *copy_format);
+
+bool
 st_GetTexSubImage_shader(struct gl_context * ctx,
                          GLint xoffset, GLint yoffset, GLint zoffset,
                          GLsizei width, GLsizei height, GLint depth,
