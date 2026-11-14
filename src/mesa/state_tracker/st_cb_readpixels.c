@@ -504,10 +504,29 @@ st_ReadPixels(struct gl_context *ctx, GLint x, GLint y,
    }
 
    if (st->pbo.download_enabled && pack->BufferObj) {
-      if (try_pbo_readpixels(st, rb,
+      enum pipe_format pbo_src_format = src_format, pbo_dst_format = dst_format;
+      enum pipe_format copy_format;
+
+      /* Texels the shader's float conversion would change are copied as
+       * unsigned integers (st_pbo_get_copy_format).
+       */
+      if (_mesa_format_matches_format_and_type(rb->Format, format, type,
+                                               pack->SwapBytes, NULL) &&
+          st_pbo_get_copy_format(src, src_format, &copy_format)) {
+         pbo_src_format = pbo_dst_format = copy_format;
+         if (copy_format &&
+             !screen->is_format_supported(screen, copy_format, src->target,
+                                          src->nr_samples,
+                                          src->nr_storage_samples,
+                                          PIPE_BIND_SAMPLER_VIEW))
+            pbo_src_format = PIPE_FORMAT_NONE;
+      }
+
+      if (pbo_src_format &&
+          try_pbo_readpixels(st, rb,
                              _mesa_fb_orientation(ctx->ReadBuffer) == Y_0_TOP,
                              x, y, width, height,
-                             format, src_format, dst_format,
+                             format, pbo_src_format, pbo_dst_format,
                              pack, pixels))
          return;
    }

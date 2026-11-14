@@ -592,6 +592,81 @@ get_pbo_conversion(enum pipe_format src_format, enum pipe_format dst_format)
    return ST_PBO_CONVERT_FLOAT;
 }
 
+/* When the client format and type of a transfer match the texture's format,
+ * the transfer has to copy the texels unchanged, as the memcpy paths do.
+ * The shaders move float and signed normalized texels as floats, which
+ * changes some bit patterns: NaN payloads can be lost, and a signed
+ * normalized -128 reads as -1.0 and is written back as -127. For a format
+ * with such channels, plain or packed into 32 bits (R11G11B10_FLOAT,
+ * R9G9B9E5_FLOAT), return true and set *copy_format to the unsigned integer
+ * format of the same texel layout, which both sides of the transfer are
+ * then viewed as, so get_pbo_conversion picks ST_PBO_CONVERT_UINT.
+ * *copy_format is PIPE_FORMAT_NONE when there is no such format, or when the
+ * texture may not get a view of another format (a display target, scanout
+ * or shared resource, whose image a driver may not be able to view so); the
+ * transfer cannot use a PBO shader then. Formats whose channels are all
+ * unsigned normalized or integer pass through the shaders unchanged and
+ * return false, as do depth, stencil and compressed formats.
+ */
+bool
+st_pbo_get_copy_format(const struct pipe_resource *texture, enum pipe_format format,
+                       enum pipe_format *copy_format)
+{
+   static const enum pipe_format uint_formats[3][4] = {
+      { PIPE_FORMAT_R8_UINT, PIPE_FORMAT_R8G8_UINT,
+        PIPE_FORMAT_R8G8B8_UINT, PIPE_FORMAT_R8G8B8A8_UINT },
+      { PIPE_FORMAT_R16_UINT, PIPE_FORMAT_R16G16_UINT,
+        PIPE_FORMAT_R16G16B16_UINT, PIPE_FORMAT_R16G16B16A16_UINT },
+      { PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32G32_UINT,
+        PIPE_FORMAT_R32G32B32_UINT, PIPE_FORMAT_R32G32B32A32_UINT },
+   };
+   const struct util_format_description *desc = util_format_description(format);
+   bool changes = false;
+
+   *copy_format = PIPE_FORMAT_NONE;
+   bool packed32 = desc->layout == UTIL_FORMAT_LAYOUT_OTHER &&
+                   desc->block.width == 1 && desc->block.height == 1 &&
+                   desc->block.depth == 1 && desc->block.bits == 32;
+   if ((desc->layout != UTIL_FORMAT_LAYOUT_PLAIN && !packed32) ||
+       util_format_is_depth_or_stencil(format))
+      return false;
+
+   for (unsigned i = 0; i < desc->nr_channels; i++) {
+      if (desc->channel[i].type == UTIL_FORMAT_TYPE_FLOAT ||
+          (desc->channel[i].type == UTIL_FORMAT_TYPE_SIGNED &&
+           desc->channel[i].normalized))
+         changes = true;
+   }
+   if (!changes)
+      return false;
+
+   if (texture->bind & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED))
+      return true;
+
+   if (packed32) {
+      *copy_format = PIPE_FORMAT_R32_UINT;
+   } else if (desc->is_array && desc->nr_channels <= 4) {
+      switch (desc->channel[0].size) {
+      case 8:
+         *copy_format = uint_formats[0][desc->nr_channels - 1];
+         break;
+      case 16:
+         *copy_format = uint_formats[1][desc->nr_channels - 1];
+         break;
+      case 32:
+         *copy_format = uint_formats[2][desc->nr_channels - 1];
+         break;
+      default:
+         break;
+      }
+   } else if (desc->block.bits == 16) {
+      *copy_format = PIPE_FORMAT_R16_UINT;
+   } else if (desc->block.bits == 32) {
+      *copy_format = PIPE_FORMAT_R32_UINT;
+   }
+   return true;
+}
+
 void *
 st_pbo_get_upload_fs(struct st_context *st,
                      enum pipe_format src_format,
