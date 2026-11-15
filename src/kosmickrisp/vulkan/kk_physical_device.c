@@ -1186,7 +1186,9 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
       settings->disabled_workarounds |= BITFIELD64_BIT(11);
       settings->disabled_workarounds |= BITFIELD64_BIT(12);
       settings->disabled_workarounds |= BITFIELD64_BIT(17);
-      settings->disabled_workarounds |= BITFIELD64_BIT(18);
+      /* 18 stays on: message_passing fragment cases with the guard in an
+       * image still read a stale payload after the barrier on macOS 27.2
+       * with an M5. */
    }
    /* M5 only workarounds */
    if (pdev->info.gpu_apple_family >= 10) {
