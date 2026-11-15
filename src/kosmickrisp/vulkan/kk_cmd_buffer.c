@@ -1214,24 +1214,9 @@ kk_CmdInsertDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer,
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, _commandBuffer);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
-   struct kk_physical_device *pdev = kk_device_physical(dev);
 
-   if (pdev->settings.gpu_capture_enabled &&
-       !pdev->settings.gpu_capture_immediately) {
-      if (!dev->gpu_capture_active &&
-          strcmp(pLabelInfo->pLabelName, "capture-marker,begin_capture") == 0) {
-         dev->gpu_capture_active = true;
-         mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
-         return;
-      }
-
-      if (dev->gpu_capture_active &&
-          strcmp(pLabelInfo->pLabelName, "capture-marker,end_capture") == 0) {
-         mtl_stop_gpu_capture();
-         dev->gpu_capture_active = false;
-         return;
-      }
-   }
+   if (kk_device_capture_label(dev, pLabelInfo->pLabelName))
+      return;
 
    /* We purposely don't call the common implementation here. It makes
     * debug regions that last until the next vkCmdInsertDebugUtilsLabelEXT()

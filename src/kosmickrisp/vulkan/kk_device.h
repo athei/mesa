@@ -165,6 +165,7 @@ kk_device_physical(const struct kk_device *dev)
    return (struct kk_physical_device *)dev->vk.physical;
 }
 
+bool kk_device_capture_label(struct kk_device *dev, const char *name);
 VkResult kk_device_init_meta(struct kk_device *dev);
 void kk_device_finish_meta(struct kk_device *dev);
 VkResult kk_device_init_lib(struct kk_device *dev);

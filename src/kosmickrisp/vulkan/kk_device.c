@@ -31,6 +31,8 @@
 #include "vulkan/wsi/wsi_common.h"
 #include "vk_pipeline_cache.h"
 
+#include "util/u_atomic.h"
+
 #include <time.h>
 
 struct kk_mtl_compiler {
@@ -202,6 +204,48 @@ kk_sampler_heap_add_locked(struct kk_device *dev, struct kk_sampler_heap *h,
    *out = rc;
 
    return VK_SUCCESS;
+}
+
+/* The Metal captures the process started so far, which number their files:
+ * counted for the process, not the device, so a device made after another
+ * one does not write over its files. */
+static uint32_t kk_gpu_capture_count;
+
+static uint32_t
+kk_next_gpu_capture(void)
+{
+   return p_atomic_inc_return(&kk_gpu_capture_count);
+}
+
+/* With MESA_KK_GPU_CAPTURE and without MESA_KK_GPU_CAPTURE_IMMEDIATELY, the
+ * debug labels "capture-marker,begin_capture" and "capture-marker,end_capture"
+ * start and stop a Metal capture, from a command buffer or a queue. Returns
+ * whether the label named one of them. */
+bool
+kk_device_capture_label(struct kk_device *dev, const char *name)
+{
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+
+   if (!pdev->settings.gpu_capture_enabled ||
+       pdev->settings.gpu_capture_immediately)
+      return false;
+
+   if (!dev->gpu_capture_active &&
+       strcmp(name, "capture-marker,begin_capture") == 0) {
+      dev->gpu_capture_active = true;
+      mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir,
+                            kk_next_gpu_capture());
+      return true;
+   }
+
+   if (dev->gpu_capture_active &&
+       strcmp(name, "capture-marker,end_capture") == 0) {
+      mtl_stop_gpu_capture();
+      dev->gpu_capture_active = false;
+      return true;
+   }
+
+   return false;
 }
 
 VkResult
@@ -396,7 +440,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    kk_device_init_icbs(dev);
 
    if (pdev->settings.gpu_capture_immediately) {
-      mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
+      mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir,
+                            kk_next_gpu_capture());
       dev->gpu_capture_active = true;
    }
 

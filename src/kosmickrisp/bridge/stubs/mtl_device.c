@@ -15,7 +15,8 @@ mtl_device_create(void)
 
 /* Device operations */
 void
-mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory)
+mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory,
+                      uint32_t index)
 {
 }
 
