@@ -20,6 +20,7 @@
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
 
 #include "vk_cmd_queue.h"
+#include "vk_common_entrypoints.h"
 
 struct kk_commit_data {
    struct kk_queue *queue;
@@ -621,4 +622,19 @@ kk_queue_finish(struct kk_device *dev, struct kk_queue *queue)
    mtx_destroy(&queue->mutex);
 
    vk_queue_finish(&queue->vk);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+kk_QueueInsertDebugUtilsLabelEXT(VkQueue _queue,
+                                 const VkDebugUtilsLabelEXT *pLabelInfo)
+{
+   VK_FROM_HANDLE(vk_queue, vk_queue, _queue);
+   struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
+
+   /* A queue label starts or stops a capture with the work submitted after
+    * it, as a command buffer label does with the work recorded after it. */
+   if (kk_device_capture_label(kk_queue_device(queue), pLabelInfo->pLabelName))
+      return;
+
+   vk_common_QueueInsertDebugUtilsLabelEXT(_queue, pLabelInfo);
 }

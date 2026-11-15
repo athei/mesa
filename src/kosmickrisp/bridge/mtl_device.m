@@ -15,6 +15,8 @@
 #include <Metal/MTLDevice.h>
 #include <Metal/MTLIndirectCommandBuffer.h>
 
+#include <stdlib.h>
+
 /* Device creation */
 mtl_device *
 mtl_device_create()
@@ -37,8 +39,12 @@ mtl_device_create()
 }
 
 /* Device operations */
+/* The trace goes to <directory>/<program name>-<pid>-<index>.gputrace, the
+ * program name without a ".exe", so each capture of a process gets a file of
+ * its own. */
 void
-mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory)
+mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory,
+                      uint32_t index)
 {
    @autoreleasepool {
       id<MTLDevice> mtl_dev = (id<MTLDevice>)mtl_dev_handle;
@@ -50,8 +56,16 @@ mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory)
 
       if (directory && [captureMgr supportsDestination: MTLCaptureDestinationGPUTraceDocument]) {
          NSString *dir = [NSString stringWithUTF8String:directory];
-         NSString *pname = [[NSProcessInfo processInfo] processName];
-         NSString *capture_path = [NSString stringWithFormat:@"%@/%@.gputrace", dir, pname];
+         /* getprogname(), not NSProcessInfo's process name, which keeps
+          * argv[0] of the launch: Wine sets the program name to the
+          * executable's file name as the path it was started by spells it,
+          * so "wine game" and "wine game.exe" give game.exe. */
+         NSString *pname = [NSString stringWithUTF8String:getprogname()];
+         if ([[pname lowercaseString] hasSuffix:@".exe"] && pname.length > 4)
+            pname = [pname substringToIndex:pname.length - 4];
+         NSString *capture_path =
+            [NSString stringWithFormat:@"%@/%@-%d-%u.gputrace", dir, pname,
+                                       [[NSProcessInfo processInfo] processIdentifier], index];
          captureDesc.destination = MTLCaptureDestinationGPUTraceDocument;
          captureDesc.outputURL = [NSURL fileURLWithPath: capture_path];
       }
