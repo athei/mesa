@@ -192,7 +192,14 @@ vs_output_block(nir_shader *shader, struct nir_to_msl_ctx *ctx)
             vector_suffixes[info.num_components]);
       varying_slot_name(ctx, location, 0);
       P(ctx, " ");
-      varying_slot_semantic(ctx, location, 0);
+      /* Fast math can compute the same position differently in two vertex
+       * shaders, and a depth prepass followed by an EQUAL depth test needs
+       * them to match. The library must enable preserveInvariance too. */
+      if (location == VARYING_SLOT_POS) {
+         P(ctx, "[[position, invariant]]");
+      } else {
+         varying_slot_semantic(ctx, location, 0);
+      }
       P(ctx, ";\n");
    }
 

@@ -79,6 +79,12 @@ kk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir,
 
    msl_preprocess_nir(nir);
 
+   /* Games expect two shaders to compute the same position. After
+    * msl_preprocess_nir the outputs are stored from SSA values, so the
+    * pass follows SSA values instead of whole variables, and no earlier pass
+    * rewrites an op depending on its other uses. */
+   NIR_PASS(_, nir, nir_propagate_invariant, true);
+
    /* Cannot be part of msl_preprocess_nir since clc does not expose
     * has_base_workgroup_id */
    nir_lower_compute_system_values_options csv_options = {
@@ -2129,7 +2135,7 @@ kk_compile_compute_pipeline(struct kk_device *device,
 
    mtl_library *library = mtl_new_library(
       device->mtl_compiler_handle, data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST, false);
    if (library == NULL)
       return VK_ERROR_INVALID_SHADER_NV;
 
@@ -2388,9 +2394,10 @@ kk_new_render_pipeline(struct kk_device *device, struct kk_shader *vs,
    mesa_shader_stage vs_stage =
       raster_stages ? util_last_bit(raster_stages) - 1u : MESA_SHADER_VERTEX;
    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+   /* The vertex function's position is [[invariant]] */
    mtl_library *vertex_library = mtl_new_library(
       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST, true);
    if (vertex_library == NULL)
       return NULL;
 
@@ -2400,7 +2407,7 @@ kk_new_render_pipeline(struct kk_device *device, struct kk_shader *vs,
 
    mtl_library *fragment_library = mtl_new_library(
       device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST, false);
    if (fragment_library == NULL)
       goto destroy_vertex;
    mtl_function_descriptor *fragment_function =

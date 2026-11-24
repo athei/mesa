@@ -146,7 +146,7 @@ kk_icb_fill_pipeline(struct kk_device *dev)
 
    mtl_library *library = mtl_new_library(
       dev->mtl_compiler_handle, kk_icb_fill_msl, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST, false);
    if (library == NULL)
       return NULL;
 

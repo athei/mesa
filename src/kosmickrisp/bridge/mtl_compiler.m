@@ -44,7 +44,8 @@ mtl_library *
 mtl_new_library(mtl_compiler *compiler, const char *src,
                 enum mtl_language_version msl_version,
                 enum mtl_math_mode math_mode,
-                enum mtl_math_floating_point_functions math_fp_fns)
+                enum mtl_math_floating_point_functions math_fp_fns,
+                bool preserve_invariance)
 {
    @autoreleasepool {
       id<MTL4Compiler> comp = (id<MTL4Compiler>)compiler;
@@ -54,6 +55,7 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
       opts.languageVersion = (MTLLanguageVersion)msl_version;
       opts.mathMode = (MTLMathMode)math_mode;
       opts.mathFloatingPointFunctions = (MTLMathFloatingPointFunctions)math_fp_fns;
+      opts.preserveInvariance = preserve_invariance;
 
       MTL4LibraryDescriptor *desc = [[MTL4LibraryDescriptor new] autorelease];
       desc.source = ns_src;

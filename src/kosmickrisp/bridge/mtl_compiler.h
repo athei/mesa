@@ -18,12 +18,14 @@ enum mtl_pixel_format;
 /* Compiler */
 mtl_compiler *mtl_new_compiler(mtl_device *device);
 
-/* Library */
+/* Library. preserve_invariance is needed for [[invariant]] outputs to take
+ * effect. */
 mtl_library *
 mtl_new_library(mtl_compiler *compiler, const char *src,
                 enum mtl_language_version msl_version,
                 enum mtl_math_mode math_mode,
-                enum mtl_math_floating_point_functions math_fp_fns);
+                enum mtl_math_floating_point_functions math_fp_fns,
+                bool preserve_invariance);
 mtl_function_descriptor *
 mtl_new_library_function_descriptor(mtl_library *library,
                                     const char *entry_point);

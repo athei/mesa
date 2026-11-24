@@ -30,7 +30,7 @@ build_precompiled_shaders(struct kk_device *dev)
 
       mtl_library *library = mtl_new_library(
          dev->mtl_compiler_handle, msl, pdev->info.msl_version,
-         MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+         MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST, false);
       if (library == NULL)
          goto fail;
 
