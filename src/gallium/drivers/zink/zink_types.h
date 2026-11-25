@@ -2174,6 +2174,8 @@ struct zink_context {
     * the next draw or dispatch ends and begins every query (zink_query_apply_changes)
     */
    bool queries_changed;
+   /* the last vkCreateQueryPool failed, which is logged once until one works */
+   bool query_pool_failed;
    bool disable_fs;
    bool disable_color_writes;
    bool was_line_loop;

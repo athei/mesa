@@ -82,6 +82,7 @@ struct zink_query {
    bool needs_rast_discard_workaround; /* query needs discard disabled */
    bool suspended;
    bool started_in_rp; //needs to be stopped in rp
+   bool lost_start; /* a start since the last begin got no Vulkan query */
 
    struct list_head active_list;
 
@@ -114,7 +115,7 @@ get_num_starts(struct zink_query *q)
    return util_dynarray_num_elements(&q->starts, struct zink_query_start);
 }
 
-static void
+static bool
 update_query_id(struct zink_context *ctx, struct zink_query *q);
 static void
 begin_stats_query(struct zink_context *ctx, struct zink_query *q);
@@ -273,10 +274,14 @@ find_or_allocate_qp(struct zink_context *ctx, struct zink_query *q, unsigned idx
 
    VkResult status = VKSCR(CreateQueryPool)(screen->dev, &pool_create, NULL, &new_pool->query_pool);
    if (status != VK_SUCCESS) {
-      mesa_loge("ZINK: vkCreateQueryPool failed (%s)", vk_Result_to_str(status));
+      /* every begin tries again: log the first failure of a run only */
+      if (!ctx->query_pool_failed)
+         mesa_loge("ZINK: vkCreateQueryPool failed (%s)", vk_Result_to_str(status));
+      ctx->query_pool_failed = true;
       FREE(new_pool);
       return NULL;
    }
+   ctx->query_pool_failed = false;
    new_pool->num_results = pool_create.queryCount;
 
    list_addtail(&new_pool->list, &ctx->query_pools);
@@ -531,10 +536,52 @@ reset_qbo(struct zink_query *q)
    q->curr_qbo = list_first_entry(&q->buffers, struct zink_query_buffer, list);
 }
 
+/* Takes back the start query_pool_get_range is filling when it cannot get a
+ * Vulkan query for it: the query keeps the results of its other starts and
+ * counts nothing until it begins again (report_lost_visible).
+ */
 static void
+drop_failed_start(struct zink_context *ctx, struct zink_query *q,
+                  struct zink_query_start *start, struct zink_vk_query *new_stats_query)
+{
+   if (new_stats_query && ctx->curr_stats_query == new_stats_query)
+      ctx->curr_stats_query = NULL;
+   for (unsigned i = 0; i < PIPE_MAX_VERTEX_STREAMS; i++) {
+      unref_vk_query(ctx, start->vkq[i]);
+      start->vkq[i] = NULL;
+   }
+   (void)util_dynarray_pop_ptr(&q->starts, struct zink_query_start);
+   q->lost_start = true;
+   q->predicate_dirty = true;
+}
+
+/* An occlusion query that missed draws for want of a Vulkan query does not
+ * know whether they were visible. It reports them visible, so that occlusion
+ * culling and conditional rendering draw what they would otherwise hide;
+ * other queries report what they counted.
+ */
+static bool
+reports_lost_visible(const struct zink_query *q)
+{
+   return q->lost_start && (q->type == PIPE_QUERY_OCCLUSION_COUNTER ||
+                            q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+                            q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
+}
+
+static void
+report_lost_visible(const struct zink_query *q, union pipe_query_result *result)
+{
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER)
+      result->u64 = MAX2(result->u64, INT32_MAX);
+   else
+      result->b = true;
+}
+
+static bool
 query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
 {
    bool is_timestamp = q->type == PIPE_QUERY_TIMESTAMP;
+   struct zink_vk_query *new_stats_query = NULL;
    struct zink_query_start *start;
    int num_queries = get_num_queries(q);
    if (!is_timestamp || get_num_starts(q) == 0) {
@@ -568,16 +615,21 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->pool->refcount++;
       } else {
          struct zink_query_pool *pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
-         if (pool->last_range == pool->num_results) {
+         if (pool && pool->last_range == pool->num_results) {
             list_del(&pool->list);
             if (pool->num_results == NUM_QUERIES && NUM_QUERIES < MAX_NUM_QUERIES)
                NUM_QUERIES *= 2;
             pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
          }
+         if (!pool) {
+            drop_failed_start(ctx, q, start, new_stats_query);
+            return false;
+         }
          vkq = CALLOC_STRUCT(zink_vk_query);
          if (!vkq) {
             mesa_loge("ZINK: failed to allocate vkq!");
-            return;
+            drop_failed_start(ctx, q, start, new_stats_query);
+            return false;
          }
 
          pool->refcount++;
@@ -586,12 +638,15 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->pool = pool;
          vkq->started = false;
          vkq->query_id = pool->last_range++;
-         if (is_stats_query(q) && pool_idx == 0)
+         if (is_stats_query(q) && pool_idx == 0) {
             ctx->curr_stats_query = vkq;
+            new_stats_query = vkq;
+         }
       }
       unref_vk_query(ctx, start->vkq[i]);
       start->vkq[i] = vkq;
    }
+   return true;
 }
 
 static struct pipe_query *
@@ -777,8 +832,11 @@ get_query_result(struct pipe_context *pctx,
 
    int num_starts = get_num_starts(query);
    /* no results: return zero */
-   if (!num_starts)
+   if (!num_starts) {
+      if (reports_lost_visible(query))
+         report_lost_visible(query, result);
       return true;
+   }
    int result_size = get_num_results(query) * sizeof(uint64_t);
    int num_maps = get_num_queries(query);
 
@@ -816,6 +874,8 @@ get_query_result(struct pipe_context *pctx,
 
    if (is_time_query(query))
       timestamp_to_nanoseconds(screen, &result->u64);
+   if (reports_lost_visible(query))
+      report_lost_visible(query, result);
 
    return true;
 fail:
@@ -1018,7 +1078,9 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
       return;
    }
 
-   update_query_id(ctx, q);
+   /* without a Vulkan query it counts nothing more until it begins again */
+   if (!update_query_id(ctx, q))
+      return;
    q->predicate_dirty = true;
    if (q->needs_reset)
       reset_qbos(ctx, q);
@@ -1180,6 +1242,7 @@ zink_begin_query(struct pipe_context *pctx,
 
    util_dynarray_clear(&query->starts);
    query->start_offset = 0;
+   query->lost_start = false;
 
    bool begin_now = ctx->in_rp || (query->type == PIPE_QUERY_TIME_ELAPSED);
    bool shares = is_stats_query(query) || get_xfb_streams(query);
@@ -1205,12 +1268,14 @@ zink_begin_query(struct pipe_context *pctx,
    return true;
 }
 
-static void
+static bool
 update_query_id(struct zink_context *ctx, struct zink_query *q)
 {
-   query_pool_get_range(ctx, q);
+   if (!query_pool_get_range(ctx, q))
+      return false;
    ctx->bs->has_work = true;
    q->has_draws = false;
+   return true;
 }
 
 static void
@@ -1303,6 +1368,21 @@ begin_stats_query(struct zink_context *ctx, struct zink_query *q)
    begin_stats_queries(ctx, &join);
 }
 
+static void
+write_end_timestamp(struct zink_context *ctx, struct zink_query *query)
+{
+   if (query->needs_reset)
+      reset_qbos(ctx, query);
+   reset_query_range(ctx, query);
+   struct zink_query_start *start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
+   VKCTX(CmdWriteTimestamp)(ctx->bs->cmdbuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            start->vkq[0]->pool->query_pool, start->vkq[0]->query_id);
+   ctx->bs->has_work = true;
+   zink_batch_usage_set(&query->batch_uses, ctx->bs);
+   _mesa_set_add(&ctx->bs->active_queries, query);
+   query->needs_update = true;
+}
+
 static bool
 zink_end_query(struct pipe_context *pctx,
                struct pipe_query *q)
@@ -1337,17 +1417,9 @@ zink_end_query(struct pipe_context *pctx,
    if (list_is_linked(&query->stats_list))
       list_delinit(&query->stats_list);
    if (is_time_query(query)) {
-      update_query_id(ctx, query);
-      if (query->needs_reset)
-         reset_qbos(ctx, query);
-      reset_query_range(ctx, query);
-      struct zink_query_start *start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
-      VKCTX(CmdWriteTimestamp)(ctx->bs->cmdbuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                               start->vkq[0]->pool->query_pool, start->vkq[0]->query_id);
-      ctx->bs->has_work = true;
-      zink_batch_usage_set(&query->batch_uses, ctx->bs);
-      _mesa_set_add(&ctx->bs->active_queries, query);
-      query->needs_update = true;
+      /* without a Vulkan query its end is not written */
+      if (update_query_id(ctx, query))
+         write_end_timestamp(ctx, query);
    } else if (query->active) {
       /* this should be a tc-optimized query end that doesn't split a renderpass */
       if (!query->started_in_rp)
@@ -1424,7 +1496,8 @@ zink_get_query_result(struct pipe_context *pctx,
       if (query->result_check_counter++ < NOWAIT_CHECK_THRESHOLD)
          return false;
       /* simple queries can use the "fast" path which (probably) avoids directly accessing a syncobj */
-      if (query->buffer_count == 1 && get_num_results(query) == 1 && query->type != PIPE_QUERY_TIME_ELAPSED) {
+      if (query->buffer_count == 1 && get_num_results(query) == 1 && query->type != PIPE_QUERY_TIME_ELAPSED &&
+          get_num_starts(query) && !reports_lost_visible(query)) {
          struct zink_query_start *start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
          unsigned query_id = start->vkq[0]->query_id;
          VkResult ret = VKCTX(GetQueryPoolResults)(screen->dev, start->vkq[0]->pool->query_pool, query_id, 1,
@@ -1784,7 +1857,9 @@ zink_render_condition(struct pipe_context *pctx,
 
       flags |= VK_QUERY_RESULT_64_BIT;
       int num_results = get_num_starts(query);
-      if (num_results) {
+      if (reports_lost_visible(query)) {
+         force_cpu_read(ctx, pquery, PIPE_QUERY_TYPE_U32, &res->base.b, 0);
+      } else if (num_results) {
          if (!is_emulated_primgen(query) &&
             !is_so_overflow_query(query) &&
             num_results == 1) {
@@ -1829,6 +1904,10 @@ zink_get_query_result_resource(struct pipe_context *pctx,
     * available
     */
    uint64_t u64[ZINK_MAX_STATS_RESULTS + 1] = {0};
+   if (index != -1 && reports_lost_visible(query)) {
+      force_cpu_read(ctx, pquery, result_type, pres, offset);
+      return;
+   }
    if (!num_queries) {
       uint32_t u32 = 1;
       if (index == -1 && result_size == sizeof(uint32_t))
