@@ -185,6 +185,11 @@ reset_batch_state_ctx(struct zink_context *ctx, struct zink_batch_state *bs)
       struct zink_query *query = (void*)entry->key;
       zink_prune_query(bs, query);
    }
+
+   /* this is where query ids get recycled; after the pruning, so that none
+    * is left on a state that goes back to the screen with its context gone
+    */
+   zink_batch_recycle_queries(ctx, bs);
 }
 
 void
@@ -259,6 +264,7 @@ zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs
    free(bs->sparse_objs.objs);
    util_dynarray_fini(&bs->freed_sparse_backing_bos);
    util_dynarray_fini(&bs->dead_querypools);
+   util_dynarray_fini(&bs->freed_queries);
    util_dynarray_fini(&bs->swapchain_obj);
    util_dynarray_fini(&bs->swapchain_obj_unsync);
    util_dynarray_fini(&bs->zombie_samplers);
@@ -377,6 +383,7 @@ create_batch_state(struct zink_context *ctx)
    bs->fd_wait_semaphores = UTIL_DYNARRAY_INIT;
    bs->fences = UTIL_DYNARRAY_INIT;
    bs->dead_querypools = UTIL_DYNARRAY_INIT;
+   bs->freed_queries = UTIL_DYNARRAY_INIT;
    bs->wait_semaphore_stages = UTIL_DYNARRAY_INIT;
    bs->wait_semaphore_values = UTIL_DYNARRAY_INIT;
    bs->fd_wait_semaphore_stages = UTIL_DYNARRAY_INIT;

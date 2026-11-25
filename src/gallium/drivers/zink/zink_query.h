@@ -47,6 +47,8 @@ zink_resume_cs_query(struct zink_context *ctx);
 void
 zink_prune_query(struct zink_batch_state *bs, struct zink_query *query);
 void
+zink_batch_recycle_queries(struct zink_context *ctx, struct zink_batch_state *bs);
+void
 zink_query_sync(struct zink_context *ctx, struct zink_query *query);
 
 void

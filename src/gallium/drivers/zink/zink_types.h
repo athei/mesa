@@ -681,6 +681,7 @@ struct zink_batch_state {
 
    struct set active_queries; /* zink_query objects which were active at some point in this batch */
    struct util_dynarray dead_querypools;
+   struct util_dynarray freed_queries; /* query ids freed in this batch: zink_batch_recycle_queries */
 
    struct util_dynarray freed_sparse_backing_bos;
 

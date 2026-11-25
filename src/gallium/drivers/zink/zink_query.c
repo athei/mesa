@@ -31,6 +31,18 @@ struct zink_query_pool {
    unsigned num_results;
    unsigned last_range;
    unsigned refcount;
+   /* ids below last_range no query uses any more, handed out again before
+    * last_range grows (zink_batch_recycle_queries)
+    */
+   struct util_dynarray free_ids;
+};
+
+/* a query id whose zink_vk_query is gone, with the pool reference it held,
+ * until the batch it was freed in has completed
+ */
+struct zink_freed_query {
+   struct zink_query_pool *pool;
+   unsigned query_id;
 };
 
 struct zink_query_buffer {
@@ -184,6 +196,7 @@ zink_context_destroy_query_pools(struct zink_context *ctx)
    list_for_each_entry_safe(struct zink_query_pool, pool, &ctx->query_pools, list) {
       VKSCR(DestroyQueryPool)(screen->dev, pool->query_pool, NULL);
       list_del(&pool->list);
+      util_dynarray_fini(&pool->free_ids);
       FREE(pool);
    }
 }
@@ -229,6 +242,21 @@ get_stats_index(const struct zink_query_start *start, VkQueryPipelineStatisticFl
    return util_bitcount(start->vkq[0]->pool->pipeline_stats & (stat - 1));
 }
 
+static bool
+pool_has_room(const struct zink_query_pool *pool)
+{
+   return pool->last_range < pool->num_results ||
+          util_dynarray_contains(&pool->free_ids, unsigned);
+}
+
+static unsigned
+pool_get_query_id(struct zink_query_pool *pool)
+{
+   if (util_dynarray_contains(&pool->free_ids, unsigned))
+      return util_dynarray_pop(&pool->free_ids, unsigned);
+   return pool->last_range++;
+}
+
 static struct zink_query_pool *
 find_or_allocate_qp(struct zink_context *ctx, struct zink_query *q, unsigned idx, bool *vkq_needs_reset)
 {
@@ -246,13 +274,14 @@ find_or_allocate_qp(struct zink_context *ctx, struct zink_query *q, unsigned idx
 
    struct zink_screen *screen = zink_screen(ctx->base.screen);
    list_for_each_entry(struct zink_query_pool, pool, &ctx->query_pools, list) {
-      if (pool->vk_query_type == vk_query_type) {
-         if (vk_query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
-            if (pool->pipeline_stats == pipeline_stats)
-               return pool;
-         } else
-            return pool;
-      }
+      if (pool->vk_query_type != vk_query_type ||
+          (vk_query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS && pool->pipeline_stats != pipeline_stats))
+         continue;
+      if (pool_has_room(pool))
+         return pool;
+      /* the next pool is larger, up to MAX_NUM_QUERIES */
+      if (pool->num_results == NUM_QUERIES && NUM_QUERIES < MAX_NUM_QUERIES)
+         NUM_QUERIES *= 2;
    }
 
    struct zink_query_pool *new_pool = CALLOC_STRUCT(zink_query_pool);
@@ -486,6 +515,7 @@ unref_vk_pool(struct zink_context *ctx, struct zink_query_pool *pool)
    util_dynarray_append(&ctx->bs->dead_querypools, pool->query_pool);
    if (list_is_linked(&pool->list))
       list_del(&pool->list);
+   util_dynarray_fini(&pool->free_ids);
    FREE(pool);
 }
 
@@ -494,10 +524,32 @@ unref_vk_query(struct zink_context *ctx, struct zink_vk_query *vkq)
 {
    if (!vkq)
       return;
-   unref_vk_pool(ctx, vkq->pool);
-   vkq->refcount--;
-   if (vkq->refcount == 0)
-      FREE(vkq);
+   if (--vkq->refcount) {
+      unref_vk_pool(ctx, vkq->pool);
+      return;
+   }
+   /* The batches up to this one can still use the id, so it is free once
+    * this one has completed; the last reference to the pool goes with it.
+    * A query that is never begun again then holds only its own ids, not
+    * the rest of its pool.
+    */
+   struct zink_freed_query freed = { vkq->pool, vkq->query_id };
+   util_dynarray_append(&ctx->bs->freed_queries, freed);
+   FREE(vkq);
+}
+
+void
+zink_batch_recycle_queries(struct zink_context *ctx, struct zink_batch_state *bs)
+{
+   while (util_dynarray_contains(&bs->freed_queries, struct zink_freed_query)) {
+      struct zink_freed_query freed = util_dynarray_pop(&bs->freed_queries, struct zink_freed_query);
+      /* a recycled id is reset before it is used again: it never comes
+       * from a pool query_pool_get_range has just created
+       */
+      if (freed.pool->refcount > 1)
+         util_dynarray_append(&freed.pool->free_ids, freed.query_id);
+      unref_vk_pool(ctx, freed.pool);
+   }
 }
 
 static void
@@ -615,12 +667,6 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->pool->refcount++;
       } else {
          struct zink_query_pool *pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
-         if (pool && pool->last_range == pool->num_results) {
-            list_del(&pool->list);
-            if (pool->num_results == NUM_QUERIES && NUM_QUERIES < MAX_NUM_QUERIES)
-               NUM_QUERIES *= 2;
-            pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
-         }
          if (!pool) {
             drop_failed_start(ctx, q, start, new_stats_query);
             return false;
@@ -637,7 +683,7 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->needs_reset = vkq_needs_reset;
          vkq->pool = pool;
          vkq->started = false;
-         vkq->query_id = pool->last_range++;
+         vkq->query_id = pool_get_query_id(pool);
          if (is_stats_query(q) && pool_idx == 0) {
             ctx->curr_stats_query = vkq;
             new_stats_query = vkq;
@@ -1240,6 +1286,17 @@ zink_begin_query(struct pipe_context *pctx,
 
    query->predicate_dirty = true;
 
+   /* it keeps none of its past Vulkan queries, also not those of the starts
+    * that the new starts would not replace
+    */
+   struct zink_query_start *starts = query->starts.data;
+   unsigned num_starts = query->starts.capacity / sizeof(struct zink_query_start);
+   for (unsigned j = 0; j < num_starts; j++) {
+      for (unsigned i = 0; i < PIPE_MAX_VERTEX_STREAMS; i++) {
+         unref_vk_query(ctx, starts[j].vkq[i]);
+         starts[j].vkq[i] = NULL;
+      }
+   }
    util_dynarray_clear(&query->starts);
    query->start_offset = 0;
    query->lost_start = false;
