@@ -52,12 +52,32 @@ kk_queue_release_cmd_buffer_locked(struct kk_queue *queue,
    util_dynarray_append(&queue->free_cmd_buffers, &cmd->vk);
 }
 
+/* Marks the device lost. The Vulkan runtime logs the reason only in a debug
+ * build or for a debug callback, so it also goes to the standard error, for
+ * the first loss of the device. */
+VkResult
+kk_device_set_lost(struct kk_device *dev, const char *format, ...)
+{
+   char message[512];
+   va_list args;
+
+   /* the device is lost already, which a later reason does not change */
+   if (p_atomic_read(&dev->lost_logged))
+      return VK_ERROR_DEVICE_LOST;
+   va_start(args, format);
+   vsnprintf(message, sizeof(message), format, args);
+   va_end(args);
+   if (!p_atomic_xchg(&dev->lost_logged, 1))
+      mesa_loge("%s", message);
+   return vk_device_set_lost(&dev->vk, "%s", message);
+}
+
 static void
 check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 {
    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
-      vk_device_set_lost(
-         &dev->vk, "Command queue error: %s, with message \"%s\"",
+      kk_device_set_lost(
+         dev, "Command queue error: %s, with message \"%s\"",
          mtl_command_queue_error_to_string(data->error), data->error_message);
       memset((uint8_t *)dev->atomic64.bo->cpu + KK_ATOMIC64_LOCK_OFFSET, 0,
              KK_ATOMIC64_ARENA_SIZE - KK_ATOMIC64_LOCK_OFFSET);
@@ -65,8 +85,7 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 
    const uint32_t *atomic64 = dev->atomic64.bo->cpu;
    if (p_atomic_read(&atomic64[KK_ATOMIC64_TIMEOUT]))
-      vk_device_set_lost(&dev->vk,
-                         "A 64-bit atomic timed out waiting for its lock");
+      kk_device_set_lost(dev, "A 64-bit atomic timed out waiting for its lock");
 }
 
 static void

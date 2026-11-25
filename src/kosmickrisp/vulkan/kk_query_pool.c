@@ -703,7 +703,8 @@ kk_query_wait_for_available(struct kk_device *dev, struct kk_query_pool *pool,
          return status;
    }
 
-   return vk_device_set_lost(&dev->vk, "query timeout");
+   return kk_device_set_lost(dev, "A query did not become available within %u s",
+                             (unsigned)(KK_QUERY_TIMEOUT / 1000000000ull));
 }
 
 static void

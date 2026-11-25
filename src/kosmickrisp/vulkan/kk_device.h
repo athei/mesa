@@ -134,6 +134,9 @@ struct kk_device {
 
    bool gpu_capture_active;
 
+   /* Set once the reason of a lost device went to the standard error */
+   uint32_t lost_logged;
+
    struct {
       struct kk_bo *bo;
       struct util_vma_heap heap;
@@ -169,6 +172,8 @@ kk_device_physical(const struct kk_device *dev)
 }
 
 bool kk_device_capture_label(struct kk_device *dev, const char *name);
+VkResult PRINTFLIKE(2, 3)
+   kk_device_set_lost(struct kk_device *dev, const char *format, ...);
 VkResult kk_device_init_meta(struct kk_device *dev);
 void kk_device_finish_meta(struct kk_device *dev);
 VkResult kk_device_init_lib(struct kk_device *dev);
