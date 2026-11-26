@@ -1497,7 +1497,14 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    }
 
    unsigned alignment = MAX2(reqs->alignment, 256);
-   if (templ->usage == PIPE_USAGE_STAGING && obj->is_buffer)
+   /* A transfer through a staging buffer keeps the offset of the data within
+    * minMemoryMapAlignment. Query buffers need no more than the map
+    * alignment zink reports (1 << MIN_SLAB_ORDER), and where
+    * minMemoryMapAlignment is a 16K page, the one each query object has
+    * would get an allocation of its own instead of a slab entry.
+    */
+   if (templ->usage == PIPE_USAGE_STAGING && obj->is_buffer &&
+       templ->bind != PIPE_BIND_QUERY_BUFFER)
       alignment = MAX2(alignment, screen->info.props.limits.minMemoryMapAlignment);
    obj->alignment = alignment;
 
