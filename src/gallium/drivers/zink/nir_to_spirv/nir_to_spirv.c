@@ -5039,9 +5039,6 @@ static SpvExecutionMode
 get_depth_layout_mode(enum gl_frag_depth_layout depth_layout)
 {
    switch (depth_layout) {
-   case FRAG_DEPTH_LAYOUT_NONE:
-   case FRAG_DEPTH_LAYOUT_ANY:
-      return SpvExecutionModeDepthReplacing;
    case FRAG_DEPTH_LAYOUT_GREATER:
       return SpvExecutionModeDepthGreater;
    case FRAG_DEPTH_LAYOUT_LESS:
@@ -5412,9 +5409,17 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
    case MESA_SHADER_FRAGMENT:
       spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
                                    SpvExecutionModeOriginUpperLeft);
-      if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
+      if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) {
+         /* every write of FragDepth needs DepthReplacing (VUID-FragDepth-FragDepth-04216),
+          * a conservative layout is declared next to it
+          */
          spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
-                                      get_depth_layout_mode(s->info.fs.depth_layout));
+                                      SpvExecutionModeDepthReplacing);
+         if (s->info.fs.depth_layout != FRAG_DEPTH_LAYOUT_NONE &&
+             s->info.fs.depth_layout != FRAG_DEPTH_LAYOUT_ANY)
+            spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
+                                         get_depth_layout_mode(s->info.fs.depth_layout));
+      }
       if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
          spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
                                       SpvExecutionModeStencilRefReplacingEXT);
