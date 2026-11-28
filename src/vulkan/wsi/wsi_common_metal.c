@@ -9,6 +9,7 @@
 #include "vk_util.h"
 
 #include "util/cnd_monotonic.h"
+#include "util/log.h"
 #include "util/os_time.h"
 #include "util/timespec.h"
 #include "util/u_vector.h"
@@ -1341,12 +1342,64 @@ wsi_metal_create_image(const struct wsi_metal_swapchain *metal_chain,
    return result;
 }
 
+/* Waits for the GPU work of the swapchain's presents, which signals the
+ * per-image fences. A present returns once its blit is committed, and a
+ * committed Metal 4 command buffer keeps nothing it uses alive: the blit
+ * command buffers, their pool, the swapchain images and the blit images bound
+ * to the drawables' textures are all freed with the swapchain. A blit to a
+ * window that was just ordered out is still waiting on the GPU for its
+ * drawable when an application destroys the swapchain right after the
+ * present, and freeing what the blit uses then makes the command queue fail
+ * with a timeout.
+ *
+ * The wait is bounded because a fence can stay unsignaled for good: the
+ * present resets or creates it before its submissions, and when one of those
+ * fails without losing the device (out of memory), nothing will signal it,
+ * and the application, which got the error from vkQueuePresentKHR, destroys
+ * the swapchain. A blit that Metal ends with a timeout does not need the
+ * bound: on KosmicKrisp the commit's feedback handler marks the device lost,
+ * and the fence wait returns within 100 ms of that, signaled or not. So the
+ * bound only has to outlast GPU work that is still running and the time Metal
+ * takes to report a timeout. Metal does not document that watchdog; 10 s is a
+ * choice above it. */
+#define WSI_METAL_DESTROY_WAIT_NS (10ull * 1000 * 1000 * 1000)
+
+static void
+wsi_metal_swapchain_wait_for_presents(struct wsi_metal_swapchain *chain)
+{
+   const struct wsi_device *wsi = chain->base.wsi;
+   uint32_t count = 0;
+
+   /* Not allocated yet when the swapchain's creation fails. */
+   if (!chain->base.fences)
+      return;
+
+   STACK_ARRAY(VkFence, fences, chain->base.image_count);
+   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+      if (chain->base.fences[i] != VK_NULL_HANDLE)
+         fences[count++] = chain->base.fences[i];
+   }
+
+   /* A lost device returns at once, and there is nothing left to wait for.
+    * Past the bound the destroy frees under whatever still waits, so a fault
+    * that follows needs this line to be traced back to it. */
+   if (count &&
+       wsi->WaitForFences(chain->base.device, count, fences, true,
+                          WSI_METAL_DESTROY_WAIT_NS) == VK_TIMEOUT)
+      mesa_logw("wsi/metal: destroying a swapchain whose presents are not "
+                "done after %llu s; freeing it anyway",
+                WSI_METAL_DESTROY_WAIT_NS / 1000000000ull);
+   STACK_ARRAY_FINISH(fences);
+}
+
 static VkResult
 wsi_metal_swapchain_destroy(struct wsi_swapchain *wsi_chain,
                                const VkAllocationCallbacks *pAllocator)
 {
    struct wsi_metal_swapchain *chain =
       (struct wsi_metal_swapchain *)wsi_chain;
+
+   wsi_metal_swapchain_wait_for_presents(chain);
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       struct wsi_metal_image *image = &chain->images[i];
